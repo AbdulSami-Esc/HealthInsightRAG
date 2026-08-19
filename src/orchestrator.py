@@ -2,9 +2,8 @@
 The LLM (via Groq) decides whether to:
   1. Call get_condition_stats (math/counting questions)
   2. Call find_high_risk_patients (high-risk filter questions)
-  3. Call search_patient_records (semantic FAISS retrieval)
+  3. Call search_patient_records (hybrid FAISS + BM25 retrieval)
   4. Answer directly with no tool (generic knowledge questions)
-
 """
 
 import os
@@ -13,37 +12,26 @@ import pandas as pd
 from groq import Groq
 from dotenv import load_dotenv 
 
-
 load_dotenv() 
 
-
-
 client = Groq(api_key=os.environ["GROQ_API_KEY"])
 MODEL_NAME = "llama-3.3-70b-versatile"
 
-##Extract functions from other files
-##Extract functions from other files
+# Extract functions from other files (including the new hybrid search and BM25 builder)
 from tools import get_condition_stats, find_high_risk_patients
-from embeddings import load_index, search_index, load_snippets
-
-client = Groq(api_key=os.environ["GROQ_API_KEY"])
-MODEL_NAME = "llama-3.3-70b-versatile"
-
-
-##System prompt is sue to establish boundaries,tone,role and safety rules to guide every response model amkes
+from embeddings import load_index, load_snippets, build_bm25_index, hybrid_search
 
 SYSTEM_PROMPT = (
     "You are HealthInsight, a healthcare operations assistant. "
     "You have access to tools for exact statistics, high-risk patient lookups, "
-    "and semantic search over patient records. Use a tool when the question "
-    "requires computation or specific patient data. Answer directly, without "
-    "a tool, for general medical knowledge questions (e.g. 'what is diabetes', "
-    "'symptoms of asthma') that don't require this dataset. "
+    "and hybrid search (semantic + exact keyword matching) over patient records. "
+    "Use a tool when the question requires computation or specific patient data. "
+    "Answer directly, without a tool, for general medical knowledge questions "
+    "(e.g. 'what is diabetes', 'symptoms of asthma') that don't require this dataset. "
     "Always be clear and concise, and never invent numbers — only report "
     "values that came from a tool result."
 )
 
-##Geenrated using AI
 TOOLS = [
     {
         "type": "function",
@@ -108,9 +96,9 @@ TOOLS = [
         "function": {
             "name": "search_patient_records",
             "description": (
-                "Semantically search patient record snippets using natural language. "
+                "Hybrid search patient record snippets using natural language and keywords. "
                 "Use this when the user asks an open-ended or descriptive question about "
-                "patient records that isn't a specific count/average or the high-risk rule -- "
+                "patient records, or searches for specific patient IDs, rare codes, or conditions -- "
                 "e.g. 'tell me about patients with unusual complications', 'find records "
                 "similar to a 45 year old male with heart issues'. "
                 "Do NOT use this for questions with an exact computable answer -- "
@@ -121,11 +109,11 @@ TOOLS = [
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "Natural language search query"
+                        "description": "Natural language or keyword search query"
                     },
                     "top_k": {
                         "type": "integer",
-                        "description": "Number of similar snippets to retrieve, defaults to 5"
+                        "description": "Number of top hybrid results to retrieve, defaults to 5"
                     }
                 },
                 "required": ["query"]
@@ -133,9 +121,6 @@ TOOLS = [
         }
     }
 ]
-
-import os
-
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(BASE_DIR, "data")
@@ -145,26 +130,46 @@ FAISS_INDEX_PATH = os.path.join(DATA_DIR, "processed", "faiss_index.bin")
 SNIPPETS_CSV_PATH = os.path.join(DATA_DIR, "processed", "snippets.csv")
 
 _df = None
-_index = None
+_faiss_index = None
 _snippets_df = None
+_bm25_index = None
 
 
 def _load_resources():
-    global _df, _index, _snippets_df
+    """Lazy load raw data, FAISS index, snippets dataframe, and build BM25 index into memory."""
+    global _df, _faiss_index, _snippets_df, _bm25_index
     if _df is None:
         _df = pd.read_csv(RAW_CSV_PATH)
-    if _index is None:
-        _index = load_index(FAISS_INDEX_PATH)
+    if _faiss_index is None:
+        _faiss_index = load_index(FAISS_INDEX_PATH)
     if _snippets_df is None:
         _snippets_df = load_snippets(SNIPPETS_CSV_PATH)
+    if _bm25_index is None:
+        # Build the sparse BM25 index on-the-fly from the processed snippets
+        _bm25_index = build_bm25_index(_snippets_df)
+
 
 def search_patient_records(query: str, top_k: int = 5):
+    """Executes hybrid search (FAISS + BM25 via RRF) over the patient snippets."""
     _load_resources()
-    results = search_index(_index, _snippets_df, query, top_k=top_k)
+    
+    # Call the new hybrid_search function from embeddings.py
+    results_df = hybrid_search(
+        query_text=query,
+        faiss_index=_faiss_index,
+        bm25_index=_bm25_index,
+        df=_snippets_df,
+        k=top_k,
+        candidates=20
+    )
+    
+    # Extract the snippet strings to feed back into the LLM
+    snippets_list = results_df["Snippet"].tolist()
+    
     return {
         "status": "ok",
         "query": query,
-        "results": results
+        "results": snippets_list
     }
 
 
@@ -175,7 +180,6 @@ TOOL_REGISTRY = {
 }
 
 
-##orchestration loop
 def ask(user_question: str, max_rounds: int = 5) -> str:
     _load_resources()
 
@@ -183,7 +187,7 @@ def ask(user_question: str, max_rounds: int = 5) -> str:
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_question},
     ]
-    ##Loop up the max round time
+
     for _ in range(max_rounds):
         response = client.chat.completions.create(
             model=MODEL_NAME,
@@ -227,8 +231,6 @@ def ask(user_question: str, max_rounds: int = 5) -> str:
                 try:
                     result = TOOL_REGISTRY[fn_name](**fn_args)
                 except Exception as e:
-                    # never let a tool crash the whole request -- feed the
-                    # error back to the model so it can explain gracefully
                     result = {"status": "error", "message": str(e)}
 
             messages.append({
@@ -241,7 +243,10 @@ def ask(user_question: str, max_rounds: int = 5) -> str:
 
 
 if __name__ == "__main__":
-    # quick manual test
+    # Quick manual tests verifying hybrid search integration via the LLM router
+    print("Test 1 (Stats):")
     print(ask("What's the average billing amount for Obesity patients?"))
+    print("\nTest 2 (Direct Knowledge):")
     print(ask("What is diabetes?"))
-    print(ask("Show me high-risk patients"))
+    print("\nTest 3 (Hybrid Search / Patient Records):")
+    print(ask("Find patient records mentioning emergency admission for diabetes"))

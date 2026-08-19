@@ -134,3 +134,62 @@ The concept I had to actually go learn for this phase was `lifespan`. Before thi
 - `lifespan` — eager loading of the dataframe, FAISS index, and snippets at server startup instead of on first request
 - `POST /ask` — calls the orchestrator, wraps the answer, and returns a clean generic error (not a raw exception) if anything fails
 - `GET /health` — a lightweight endpoint separate from the expensive path, so the service's liveness can be checked without triggering a full LLM round trip
+
+
+
+
+
+
+## Scaling HealthInsight: Exploring New Search Techniques
+
+As a next step beyond the initial 5 phases, this project is being scaled to explore
+different retrieval strategies within the RAG pipeline. The first technique implemented is **hybrid search**.
+
+### Why hybrid search
+
+The original retrieval path used only dense vector search (FAISS `IndexFlatL2`
+over MiniLM embeddings). Vector search is strong at matching *meaning* — a query
+like "patients with heart problems" will correctly surface records mentioning
+cardiac conditions even without an exact word match. But it's weaker at *exact*
+terms: patient IDs, precise medical condition names, or hospital names can rank
+poorly if their embedding isn't "semantically close" to the query, even when the
+literal word is right there in the text.
+
+Hybrid search fixes this by running two retrieval methods in parallel and merging
+the results:
+
+- **Dense retrieval (FAISS)** — unchanged from before, finds semantically similar snippets.
+- **Sparse retrieval (BM25)** — a keyword-based ranking algorithm (via `rank_bm25`)
+  that scores documents on exact term overlap with the query.
+
+The two ranked lists are combined using **Reciprocal Rank Fusion (RRF)**, which
+merges them by rank position rather than raw score 
+
+### How it works now
+
+`src/embeddings.py` now exposes:
+- `build_bm25_index(df)` — builds a BM25 index over the same snippets used for FAISS
+- `embed_query(query_text)` — embeds a live user query
+- `reciprocal_rank_fusion(...)` — merges FAISS and BM25 ranked results
+- `hybrid_search(query_text, faiss_index, bm25_index, df, k, candidates)` — the full
+  pipeline: embed + search both indexes, fuse, return top-k matching rows
+
+The BM25 index is rebuilt from `snippets.csv` at startup rather than saved to disk,
+since rebuilding it is cheap even at ~55,500 rows.
+
+### What this means for the bot
+
+Once wired into the orchestrator's `search_patient_records` tool, the assistant will
+be able to correctly retrieve records for exact-term queries (patient IDs, specific
+condition names) that pure vector search could previously miss, while keeping the
+existing semantic search strength for descriptive, natural-language questions.
+
+### Wiring into Orchestrator (`src/orchestrator.py`)
+
+The orchestrator has been updated to integrate the hybrid retrieval pipeline into the Groq tool-calling loop:
+
+- **Startup & Resource Management:** `_load_resources()` now lazy-loads the FAISS index, raw dataset, and snippets DataFrame, while building the `BM25Okapi` index in memory on startup via `build_bm25_index(_snippets_df)`.
+- **Hybrid Tool Execution:** `search_patient_records` was upgraded from pure FAISS search to call `hybrid_search(...)`, querying both FAISS and BM25 simultaneously and returning fused RRF candidate records.
+
+
+**Status:** Core hybrid search is fully wired and integrated into `orchestrator.py`.
