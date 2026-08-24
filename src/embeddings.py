@@ -6,9 +6,11 @@ from collections import defaultdict
 from rank_bm25 import BM25Okapi
 import numpy as np
 
-
 from sentence_transformers import SentenceTransformer
 model = SentenceTransformer('all-MiniLM-L6-v2')
+
+import document_prep  # your chunking module
+
 
 ##Definig the function load_snippets()
 ##Loads the procesed dataset and return the dataframe
@@ -16,27 +18,30 @@ def load_snippets(filename):
     current_dir = os.path.dirname(os.path.abspath(__file__))
     file_path = os.path.join(current_dir, '..', 'data', 'processed', filename)
 
-    data=pd.read_csv(file_path)
+    data = pd.read_csv(file_path)
 
-    print("Shape:",data.shape)
-    print("Columns:",data.columns.tolist())
+    print("Shape:", data.shape)
+    print("Columns:", data.columns.tolist())
     return data
 
-##convert the all the strings in simple embeddings and then a list 
-def generate_embeddings(df):
-    snippet_list=df["Snippet"].fillna("").astype(str).tolist()
 
-    ##Pass whole series os string to encode at once so that CPU can do hardware acceleration
-    vec=model.encode(snippet_list,batch_size=128,show_progress_bar=True)
+## CHANGED: now takes a plain list of strings instead of a dataframe.
+## This lets the same function embed patient snippets OR chunk text —
+## caller decides what list to pass in.
+def generate_embeddings(texts_list):
+    ##Pass whole list of strings to encode at once so CPU can do hardware acceleration
+    vec = model.encode(texts_list, batch_size=128, show_progress_bar=True)
     print(type(vec), vec.shape, vec.dtype)
 
     return vec
 
-##build IndexFlatL2 with dimensions inferred from embeddings shape
-def build_faiss_index(embeddings):
-    dimensions=embeddings.shape[1]
 
-    index=faiss.IndexFlatL2(dimensions)
+##build IndexFlatL2 with dimensions inferred from embeddings shape
+##Unchanged — this was already generic, works for any embeddings array
+def build_faiss_index(embeddings):
+    dimensions = embeddings.shape[1]
+
+    index = faiss.IndexFlatL2(dimensions)
 
     index.add(embeddings)
 
@@ -57,95 +62,146 @@ def search_index(index, embeddings, df, query_position=0, k=5):
 
     return distances, indices
 
+
 def save_index(index, filename):
     current_dir = os.path.dirname(os.path.abspath(__file__))
-    output_file = os.path.join(current_dir, '..', 'data', 'processed', filename)
-
+    target_dir = os.path.join(current_dir, '..', 'data', 'processed')
+    
+    # Good practice to add it here too, just in case
+    os.makedirs(target_dir, exist_ok=True)
+    
+    output_file = os.path.join(target_dir, filename)
     faiss.write_index(index, output_file)
     print(f"Index saved to {output_file}")
+
 
 
 def load_index(path):
     return faiss.read_index(path)
 
-def build_bm25_index(df):
-    snippets = df["Snippet"].fillna("").astype(str).str.lower().tolist()
-    tokenized_corpus = [doc.split() for doc in snippets]
+
+## CHANGED: now takes a plain list of strings instead of a dataframe.
+def build_bm25_index(texts_list):
+    lowered = [str(t).lower() for t in texts_list]
+    tokenized_corpus = [doc.split() for doc in lowered]
     bm25 = BM25Okapi(tokenized_corpus)
     return bm25
 
+
 def embed_query(query_text):
-    # model.encode([query_text]) -> single vector, reshaped for FAISS
     # model.encode expects a list of strings and returns a 2D numpy array
     vector = model.encode([query_text], convert_to_numpy=True)
-    
+
     return vector.astype('float32')
 
 
 def reciprocal_rank_fusion(faiss_ranked_indices, bm25_ranked_indices, k=60):
     fused_scores = defaultdict(float)
-    
-    # Process FAISS rankings (1-based rank)
+
     for rank, idx in enumerate(faiss_ranked_indices, start=1):
         fused_scores[idx] += 1.0 / (k + rank)
-        
-    # Process BM25 rankings
+
     for rank, idx in enumerate(bm25_ranked_indices, start=1):
         fused_scores[idx] += 1.0 / (k + rank)
-        
-    # Sort indices by their fused score in descending order
+
     sorted_indices = sorted(fused_scores.keys(), key=lambda x: fused_scores[x], reverse=True)
-    
+
     return sorted_indices
 
 
-
-def hybrid_search(query_text, faiss_index, bm25_index, df, k=5, candidates=20):
-    # 1. Dense Search(FAISS changes it into dense vector and feches top 20 semntical closest row)
-    query_vector = embed_query(query_text) # Shape: (1, 384)
+## CHANGED: takes texts_list instead of assuming df["Snippet"] — used for
+## both patient-snippet hybrid search and chunk hybrid search now.
+def hybrid_search(query_text, faiss_index, bm25_index, texts_list, k=5, candidates=20):
+    query_vector = embed_query(query_text)
     distances, faiss_indices = faiss_index.search(query_vector, candidates)
-    faiss_ranked_indices = faiss_indices[0].tolist() # Flatten 2D array to 1D list
-    
-    # 2. Sparse Search (BM25)
-    # Must use the exact same tokenization style as build_bm25_index (.lower().split())
+    faiss_ranked_indices = faiss_indices[0].tolist()
+
     tokenized_query = query_text.lower().split()
     bm25_scores = bm25_index.get_scores(tokenized_query)
-    
-    # Get indices of top candidates sorted by score descending
     bm25_ranked_indices = np.argsort(bm25_scores)[::-1][:candidates].tolist()
-    
-    #Combine Rankings using Reciprocal Rank Fusion
+
     fused_indices = reciprocal_rank_fusion(faiss_ranked_indices, bm25_ranked_indices)
-    
-    #Take the top 'k' final results
     top_k_indices = fused_indices[:k]
+
+    return [texts_list[i] for i in top_k_indices], top_k_indices
+
+
+# ---------------------------------------------------------------------
+# NEW: chunk-specific pipeline (separate from the patient-snippet index)
+# ---------------------------------------------------------------------
+
+def load_unstructured_raw(filename="healthcare_dataset.csv"):
+    """Loads the raw unstructured dataset (medical transcriptions) that
+    document_prep.py will chunk."""
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    file_path = os.path.join(current_dir, '..', 'data', 'unstructured', 'raw', filename)
+    return pd.read_csv(file_path)
+
+
+def build_chunk_dataset(raw_df):
+    """Runs document_prep on the raw dataframe and returns the flattened
+    list of chunk dicts: [{record_index, bucket_name, chunk_position, text}, ...]"""
+    return document_prep.prepare_all_chunks(raw_df)
+
+
+def save_chunk_metadata(chunks, filename):
+    """Saves chunk metadata + text to disk, in the SAME order the chunks
+    were embedded in."""
+    current_dir = os.path.dirname(os.path.abspath(__file__))
     
-    #Return the matching rows from your dataset for your FastAPI route to process
-    return df.iloc[top_k_indices]    
+    # Define the specific directory path
+    target_dir = os.path.join(current_dir, '..', 'data', 'unstructured', 'processed')
+    
+    # CREATE THE DIRECTORY IF IT DOESN'T EXIST (This is the fix!)
+    os.makedirs(target_dir, exist_ok=True)
+    
+    output_file = os.path.join(target_dir, filename)
+    pd.DataFrame(chunks).to_csv(output_file, index=False)
+    print(f"Chunk metadata saved to {output_file}")
 
 
 
-
+def load_chunk_metadata(filename):
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    file_path = os.path.join(current_dir, '..', 'data', 'unstructured', 'processed', filename)
+    return pd.read_csv(file_path)
 
 
 if __name__ == "__main__":
-    # Load processed snippets
+    # ---- Existing patient snippet index (unchanged behavior) ----
     dataframe = load_snippets('snippets.csv')
     print(dataframe.head())
 
-    # Dense index: embeddings + FAISS
-    embeddings = generate_embeddings(dataframe)
+    snippet_texts = dataframe["Snippet"].fillna("").astype(str).tolist()
+    embeddings = generate_embeddings(snippet_texts)
     faiss_idx = build_faiss_index(embeddings)
-    print(faiss_idx)
     save_index(faiss_idx, 'faiss_index.bin')
 
-    # Sparse index: BM25 (rebuilt from snippets each run, not saved to disk)
-    bm25_idx = build_bm25_index(dataframe)
+    bm25_idx = build_bm25_index(snippet_texts)
 
-    # Sanity check: run a real hybrid query before wiring this into the orchestrator
     test_query = "diabetic patient emergency admission"
-    results = hybrid_search(test_query, faiss_idx, bm25_idx, dataframe, k=5)
-    print(results[["Snippet"]])
+    results_text, _ = hybrid_search(test_query, faiss_idx, bm25_idx, snippet_texts, k=5)
+    print(results_text)
 
+    # ---- NEW: chunk index for unstructured clinical transcriptions ----
+    raw_df = load_unstructured_raw('mtsamples.csv')
+    chunks = build_chunk_dataset(raw_df)          # list of dicts
+    chunk_texts = [c["text"] for c in chunks]
 
-    
+    chunk_embeddings = generate_embeddings(chunk_texts)
+    chunk_faiss_idx = build_faiss_index(chunk_embeddings)
+    save_index(chunk_faiss_idx, 'chunk_faiss_index.bin')
+
+    chunk_bm25_idx = build_bm25_index(chunk_texts)
+    save_chunk_metadata(chunks, 'chunk_metadata.csv')
+
+    # Proof-of-value test: a query whose answer is buried deep inside a
+    # long transcription section, not in a short field.
+    proof_query = "plan for bariatric surgery patient with family history of heart disease"
+    proof_results, proof_positions = hybrid_search(
+        proof_query, chunk_faiss_idx, chunk_bm25_idx, chunk_texts, k=5
+    )
+    for pos, text in zip(proof_positions, proof_results):
+        meta = chunks[pos]
+        print(f"[record {meta['record_index']} | {meta['bucket_name']} | chunk {meta['chunk_position']}]")
+        print(text[:200], "\n")

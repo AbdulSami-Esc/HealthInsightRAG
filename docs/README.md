@@ -193,3 +193,70 @@ The orchestrator has been updated to integrate the hybrid retrieval pipeline int
 
 
 **Status:** Core hybrid search is fully wired and integrated into `orchestrator.py`.
+
+## Scaling HealthInsight: Chunking for Unstructured Clinical Text
+
+After hybrid search, the next scaling module was **chunking** — handling
+long, unstructured clinical documents that the original pipeline was never
+designed for.
+
+### Why chunking was needed
+
+The original snippets (`data/processed/snippets.csv`) are short, structured
+sentences built from one patient row each — they comfortably fit inside
+`all-MiniLM-L6-v2`'s 256-token limit, so chunking was never a decision point.
+
+But clinical transcription notes are different: long, free-text, and
+inconsistent in structure. Embedding a whole transcription as one vector
+causes two problems — it either gets silently truncated past 256 tokens, or
+the vector becomes a diluted "average" of too many unrelated ideas (history,
+medications, plan, allergies all blurred into one meaning), which hurts
+retrieval accuracy. Chunking splits these documents into smaller, focused
+pieces so each one embeds cleanly and stays retrievable on its own.
+
+### How chunking works
+
+Implemented as a **two-pass strategy** in the new `src/document_prep.py`:
+
+- **First pass — split by section.** Clinical notes follow a semi-consistent
+  SOAP-style structure (`SUBJECTIVE:`, `PAST MEDICAL HISTORY:`, `PLAN:`,
+  etc.). A regex finds these header labels dynamically per record — no fixed
+  set of expected sections, since some records skip sections entirely (e.g.
+  no `PLAN`).
+- **Second pass — recursive sub-split, only when needed.** If a section is
+  still over the 256-token limit after step one (checked using the real
+  MiniLM tokenizer, not character count), it gets recursively split further
+  using `langchain_text_splitters.RecursiveCharacterTextSplitter`.
+
+Every chunk keeps metadata tying it back to where it came from — which
+record, which section, and its position within that section — since a chunk
+retrieved in isolation is meaningless without knowing its source.
+
+### What was built
+
+- `process_clinical_transcription()` — first-pass section splitter +
+  second-pass recursive fallback for any section over the token limit
+- `process_single_record()` — applies column-specific chunking rules per
+  patient record (description, medical specialty, transcription, keywords)
+- `prepare_all_chunks()` — runs chunking across the whole dataset and
+  flattens the output into one list of `{record_index, bucket_name,
+  chunk_position, text}` records, ready for embedding
+
+`src/embeddings.py` was generalized so `generate_embeddings()` and
+`build_bm25_index()` now accept a plain list of text instead of assuming a
+`Snippet` column — the same functions now build a **second, separate FAISS +
+BM25 index** just for chunks, plus `save_chunk_metadata()` /
+`load_chunk_metadata()` so a retrieved chunk can always be traced back to its
+source record and section.
+
+### Wiring into the orchestrator
+
+`src/orchestrator.py` gained a new tool, `search_clinical_documents`, run
+through the same hybrid search + RRF pipeline as `search_patient_records`,
+but over the chunk index. The LLM now decides between two retrieval tools
+depending on whether a question needs a short structured fact
+(`search_patient_records`) or detail buried in a longer clinical note
+(`search_clinical_documents`).
+
+**Status:** Chunking implemented and validated on sample records; wired into
+the orchestrator as a second hybrid-search tool.
