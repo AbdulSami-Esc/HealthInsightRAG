@@ -33,6 +33,9 @@ SYSTEM_PROMPT = (
     "inside a longer clinical note -- e.g. treatment plans, patient history, or "
     "reasoning a doctor documented, not just a short structured fact. "
     "Use a tool when the question requires computation or specific patient data. "
+    "If a search does not return one perfect match, synthesize the best answer "
+    "from the closest available results instead of repeating the same search "
+    "with reworded queries. "
     "Answer directly, without a tool, for general medical knowledge questions "
     "(e.g. 'what is diabetes', 'symptoms of asthma') that don't require this dataset. "
     "Always be clear and concise, and never invent numbers -- only report "
@@ -273,7 +276,6 @@ TOOL_REGISTRY = {
     "search_clinical_documents": lambda **kwargs: search_clinical_documents(**kwargs),
 }
 
-
 def ask(user_question: str, max_rounds: int = 5) -> str:
     _load_resources()
 
@@ -333,7 +335,36 @@ def ask(user_question: str, max_rounds: int = 5) -> str:
                 "content": json.dumps(result),
             })
 
-    return "I wasn't able to fully answer that within the allowed number of tool-call rounds. Please try rephrasing your question."
+    # Rounds exhausted. Instead of continuing the same message history
+    # (which biases the model toward another tool call), build a fresh,
+    # clean prompt: just the original question + a plain-text summary
+    # of everything retrieved so far, and ask it to answer directly.
+    collected_results = []
+    for m in messages:
+        if m.get("role") == "tool":
+            collected_results.append(m["content"])
+
+    synthesis_prompt = (
+        f"Original question: {user_question}\n\n"
+        f"Here is all the information retrieved from tools so far:\n"
+        f"{chr(10).join(collected_results)}\n\n"
+        f"Using only this information, write a clear, direct answer to the "
+        f"original question. Do not call any tools -- just answer in plain text."
+    )
+
+    final_response = client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": synthesis_prompt},
+        ],
+    )
+    return final_response.choices[0].message.content
+
+
+
+
+
 
 
 if __name__ == "__main__":
