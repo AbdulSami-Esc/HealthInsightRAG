@@ -1,41 +1,57 @@
-import pandas as pd
 import os
+from pathlib import Path
 
+import pandas as pd
+##The puirpose of creating this whole proghram is to ensure structural transformation of tabular patient records
+##into semantic natural language to make it easy for model to understand
 
-def load_data(filename):
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    file_path = os.path.join(current_dir, '..', 'data', 'raw', filename)
-
+def load_data(filename:str)->pd.DataFrame:
+    file_path = Path(__file__).parent.parent / 'data' / 'raw' / filename
     data=pd.read_csv(file_path)
 
     print("Shape:",data.shape)
     print("Columns:",data.columns.tolist())
     return data
 
+##Ddi this so that all NaN values in any column of the patienmr rows can be handl;ed properly
+def _safe_value(value):
+    if pd.isna(value):
+        return "|Nan"
+    return str(value)
+
+
 ##Function to output a string type description of each row
-def row_to_text(row):
-    # Using an f-string to build a natural-sounding sentence. 
+def row_to_text(row:pd.Series)->str:
+    name = _safe_value(row.get('Name', '|Nan'))
+    age = _safe_value(row.get('Age', '|Nan'))
+    gender = _safe_value(row.get('Gender', '|Nan'))
+    hospital = _safe_value(row.get('Hospital', '|Nan'))
+    admission_date = _safe_value(row.get('Date of Admission', '|Nan'))
+    admission_type = _safe_value(row.get('Admission Type', '|Nan'))
+    medical_condition = _safe_value(row.get('Medical Condition', '|Nan'))
+    doctor = _safe_value(row.get('Doctor', '|Nan'))
+    test_results = _safe_value(row.get('Test Results', '|Nan'))
+    medication = _safe_value(row.get('Medication', '|Nan'))
+    billing_amount = _safe_value(row.get('Billing Amount', '|Nan'))
+
     sentence = (
-        f"Patient {row['Name']} is a {row['Age']}-year-old {row['Gender']} "
-        f"(who was admitted to {row['Hospital']} "
-        f"on {row['Date of Admission']} as an '{row['Admission Type']}' case for "
-        f"{row['Medical Condition']}. Under the care of Dr. {row['Doctor']}, "
-        f"their test results were marked as '{row['Test Results']}', and they "
-        f"were prescribed {row['Medication']}. The total billing amount for "
-        f"this visit was ${row['Billing Amount']}."
+        f"Patient {name} is a {age}-year-old {gender} "
+        f"(who was admitted to {hospital} on {admission_date} as an '{admission_type}' case for "
+        f"{medical_condition}. Under the care of Dr. {doctor}, their test results were marked as "
+        f"'{test_results}', and they were prescribed {medication}. The total billing amount for "
+        f"this visit was ${billing_amount}."
     )
-    
+
     return sentence
 
-##Function built to apply the function above to whole dataset
 def build_snippets(df):
-    df['Patient_ID'] = df.index
-    
-    # Apply the row_to_text function across the rows (axis=1)
-    df['Snippet'] = df.apply(row_to_text, axis=1)
+    ##Function built to apply the function above to whole dataset
 
-    ##Will return id with description column only
-    return df[['Patient_ID', 'Snippet']]
+    snippets_df = pd.DataFrame()
+    snippets_df['Patient_ID'] = df.index
+    snippets_df['Snippet'] = df.apply(row_to_text, axis=1)
+    return snippets_df
+
 
 def save_snippets(df,output_path):
     df.to_csv(output_path, index=False)

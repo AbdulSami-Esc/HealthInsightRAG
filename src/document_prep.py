@@ -15,7 +15,7 @@ general_splitter = RecursiveCharacterTextSplitter(
 )
 
 def process_clinical_transcription(transcript_text):
-    header_pattern = re.compile(r'([A-Z\s/]+:)\s*')
+    header_pattern = re.compile(r'(?m)^([A-Z\s/]+:)\s*')
     parts = header_pattern.split(str(transcript_text))
     
     sections = []

@@ -11,7 +11,7 @@ def get_condition_stats(df: pd.DataFrame, condition: str, operation: str = "coun
     if operation not in ("count", "average"):
         return {"status": "error", "message": f"unsupported operation '{operation}', expected 'count' or 'average'"}
 
-    mask = df["Medical Condition"].str.lower() == condition.strip().lower()
+    mask = df["Medical Condition"].fillna("").str.lower() == condition.strip().lower()
     matches = df[mask]
 
     if matches.empty:

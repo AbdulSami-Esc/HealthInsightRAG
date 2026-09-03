@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pandas as pd
 import os
 import faiss
@@ -7,7 +9,7 @@ from rank_bm25 import BM25Okapi
 import numpy as np
 
 from sentence_transformers import SentenceTransformer
-model = SentenceTransformer('all-MiniLM-L6-v2')
+
 
 import document_prep  # your chunking module
 
@@ -15,8 +17,7 @@ import document_prep  # your chunking module
 ##Definig the function load_snippets()
 ##Loads the procesed dataset and return the dataframe
 def load_snippets(filename):
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    file_path = os.path.join(current_dir, '..', 'data', 'processed', filename)
+    file_path = Path(__file__).parent.parent / 'data' / 'processed' / filename
 
     data = pd.read_csv(file_path)
 
@@ -25,20 +26,19 @@ def load_snippets(filename):
     return data
 
 
-## CHANGED: now takes a plain list of strings instead of a dataframe.
-## This lets the same function embed patient snippets OR chunk text —
-## caller decides what list to pass in.
+
 def generate_embeddings(texts_list):
-    ##Pass whole list of strings to encode at once so CPU can do hardware acceleration
+    #3This function would generate embeddings for the given list of texts using the SentenceTransformer model.
+    ##Moroever it would return the embeddings as a numpy array with N row and 384 dimensions 
     vec = model.encode(texts_list, batch_size=128, show_progress_bar=True)
+    model = SentenceTransformer('all-MiniLM-L6-v2')
     print(type(vec), vec.shape, vec.dtype)
 
     return vec
 
 
-##build IndexFlatL2 with dimensions inferred from embeddings shape
-##Unchanged — this was already generic, works for any embeddings array
 def build_faiss_index(embeddings):
+    ##builds IndexFlatL2 space where we can add our embeddings and then search for nearest neighbors
     dimensions = embeddings.shape[1]
 
     index = faiss.IndexFlatL2(dimensions)
@@ -48,9 +48,9 @@ def build_faiss_index(embeddings):
     return index
 
 
-##It would conver user query in integer index and then take it to our existing embeddings array
-##Then resues that embeddings ss query
 def search_index(index, embeddings, df, query_position=0, k=5):
+    #3It would check the index for the nearest neighbors of the embedding at query_position and return the distances and indices of the nearest neighbors.
+
     query = embeddings[query_position].reshape(1, -1)
     distances, indices = index.search(query, k)
 
@@ -89,7 +89,8 @@ def build_bm25_index(texts_list):
 
 
 def embed_query(query_text):
-    # model.encode expects a list of strings and returns a 2D numpy array
+    ##Takes user query and returns the embedding vector for that query using the same model as used for the dataset embeddings.
+    model = SentenceTransformer('all-MiniLM-L6-v2')
     vector = model.encode([query_text], convert_to_numpy=True)
 
     return vector.astype('float32')
