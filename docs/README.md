@@ -1,262 +1,74 @@
-# HealthInsight — Phase Log
+# HealthInsight — Architectural Log
 
-Each phase below gets filled in as it's completed: what was built, what
-concepts were learned, and what "done" looked like. Keep entries short —
-this is a log, not an essay.
+## What this actually is
 
----
+HealthInsight is a clinical operations assistant — the kind of thing a doctor, nurse, or clinic admin could type a plain-English question into and get back the right patient records, without manually reading through thousands of clinical notes. It handles two kinds of questions in two different ways: semantic questions get searched intelligently against the clinical record corpus, and general medical questions get answered directly. Underneath, it's an agent that decides which of those two paths a question needs, then goes and does it.
 
-## Phase 0 — Setup
-**Status:** _pending_
-**Goal:** Environment ready — all core libraries importable, FastAPI serves a hello-world.
-**Concepts learned:**
-
-**What I built:**
-**Done looked like:**
+This log tracks not just what got built, but *why* — including the decisions that turned out to matter more than expected, and the ones I got wrong on the first pass.
 
 ---
 
-## Phase 1 — Data → Text
-**Status:** _in progress_
-**Goal:** Convert structured patient rows into plain-English text snippets so they can be embedded.
-**Concepts learned:**
-- AI models are trained on human language, meaning raw spreadsheet columns
-- When we change data in our rows to text, we add verbs and prepositions that explicitly tell the AI how the data connects.
+## In plain terms
 
+Imagine a clinic with thousands of patient visit notes on file. A doctor wants to know something like *"which patients have been treated for asthma"* — normally that means someone manually reading through file after file. HealthInsight lets them just ask, in a normal sentence, and get back the actual relevant notes instead of a pile of paperwork to sift through.
 
-
-**Why this matters specifically once FAISS enters:**
-Phase 2 will  `read data/processed/snippets.csv` — it never touches raw data. That means we can completely rebuild our FAISS index (re-embed, different model, different index type) without re-running Phase 1 at all, as long as the snippets file doesn't need to change.If the snippets require any change so we can re run both phases one after another
-
-**Why it matters for scaling later (multiple internships from now):** once you have more data sources like lab results or new hospital data each new source likely needs its own row_to_text equivalent, but they'd all still feed into the same embedding + FAISS pipeline. If Phase 1 and Phase 2 logic were written together, adding a new data source would mean rewriting embedding logic too. Kept separate, adding a new source just means writing one new small function that outputs snippets in the same shape.
-**What I built:**
-- `load_data()` — loads raw CSV into a dataframe
-- `row_to_text()` — converts one row into a natural-language sentence
-- Applied across the dataset, saved to `data/processed/snippets.csv`
+It doesn't just match exact words either — ask about "breathing problems" and it can still find notes that say "wheezing" or "shortness of breath," because it understands meaning, not just keywords. Right now it's built and tested against a synthetic dataset of clinical transcriptions, not real patient data, while the underlying retrieval system gets hardened.
 
 ---
 
-## Phase 2 — Embeddings + FAISS Index
-**Status:** done
+## The original build
 
-**Goal:** Convert patient text snippets into numerical vectors and build a searchable FAISS index, so semantically similar patient records can be retrieved by meaning, not just exact keyword matches.
+The first version worked, but it carried some quiet fragility that only became obvious once I started trying to scale it.
 
-**Concepts learned:**
+Text got normalized into clean, standalone clinical records (`src/data_prep.py`) — this decoupling turned out to be a good call, since it meant the embedding model and index type could change later without re-touching the source text. That decision paid off directly during the Qdrant migration.
 
-Embeddings are how AI models represent meaning as numbers.A sentence gets converted into a fixed length vector (384 numbers for this  model), and sentences with similar meaning end up numerically close to each other in that vector space.
+From there, `src/embeddings.py` did the heavy lifting: 384-dimensional dense vectors from `all-MiniLM-L6-v2`, stored in a FAISS `IndexFlatL2` index, sitting alongside a BM25 keyword index. Every query hit both, and a hand-written Reciprocal Rank Fusion function (`k=60`) merged the two ranked lists into one. It's a genuinely solid retrieval design — the problem was never the *logic*, it was where all of it *lived*.
 
-This fixed length (384) comes from the model itself, not the input, 3-word sentence and a 60-word sentence both produce a 384 number vector. That's what makes comparison between any two vectors possible in the first place.
+Everything — the FAISS index, the BM25 index, the metadata used for filtering — existed only inside the running Python process's memory. Restart the server, and it all had to be rebuilt from a CSV and a `.bin` file on disk. Filtering by category (like restricting a search to actual clinical notes rather than one-line summaries) meant pulling back a batch of results and then throwing most of them away in Python — post-filtering, which quietly caps how much useful signal ever makes it back.
 
-FAISS doesn't understand text — it only understands vectors and distance. IndexFlatL2 compares vectors using Euclidean distance: smaller distance means more similar meaning. It checks every vector against every other one (brute force).
-
-**Why this step matters:** once patient records are represented as vectors, "find me records like this one" becomes a pure math problem measuring distance instead of relying on exact keyword overlap the way traditional search does.
-
-**Why this matters specifically once the LLM enters the picture:** the LLM never touches raw patient data directly. Instead, a user's question gets embedded the same way, FAISS finds the closest matching patient snippets by distance, and only those relevant snippets get handed to the LLM as context. This is what keeps the LLM's answers completely related to real data instead of guessing.
-
-**Why it matters for scaling later:** the embedding model and FAISS index don't care where snippets came from — they just need text in the same shape. If more data sources get added later (lab results, a second hospital), they just need to produce snippets like Phase 1 does; this embedding step stays untouched.
-
-What I built:
-
-load_snippets() — loads the processed text snippets from Phase 1
-generate_embeddings() — encodes all snippets into 384 dimension vectors using all-MiniLM-L6-v2, batched for speed
-build_faiss_index() — creates an IndexFlatL2 index and adds all vectors to it
-search_index() — tested retrieval by querying with a known vector and confirming it matched itself first, then returned genuinely similar patients (same condition/urgency) as the next-closest results
-save_index() / load_index() — persists the built index to disk so it never needs to be rebuilt from scratch
-
-## Phase 3 — Tool Functions
-**Status:** done
-
-**Goal:** Give the system a way to answer questions that FAISS genuinely can't like exact counts, averages, and rule-based filtering. Vector search is great at "find me things similar to this," but it's the wrong tool entirely for "how many patients have Diabetes" or "give me exact billing average." Those need real computation on the real dataframe.
-
-**Concepts learned:**
-
-FAISS retrieval and structured functions solve two completely different problems. Semantic search answers "what's related to this," math answers "what's the exact number." A healthcare assistant needs both, so Phase 3 exists to give the LLM (in Phase 4) a way to reach for real computation instead of trying to interpreting for example an average from retrieved text snippets, which would just be wrong.
-
-I also learned that the shape of what a function *returns* matters as much as what it does. Every tool here returns a dict with a `status` key (`ok` / `not_found` / `error`) instead of raising exceptions.An LLM consuming these results needs something consistent it can branch on, not five different versions of "something went wrong" it has to guess about.
-
-Case-insensitive matching on the condition name was a small decision- the dataset stores exact strings like `"Diabetes"`, but a user (or an LLM guessing the argument) won't always match casing exactly. Handling that at the tool level meant I didn't have to push that responsibility up to the LLM or the user.
-
-
-
-**Why it matters for scaling later:** because every tool follows the same `status`-dict pattern, adding a third, fourth, or tenth tool later means writing one more function in the same shape — not redesigning how tools communicate their results.
-
-**What I built:**
-- `get_condition_stats()` — count or average (billing amount by default, configurable column) for a given medical condition, case-insensitive match, graceful "not found" for unknown conditions
-- `find_high_risk_patients()` — filters on a rule I decided on logically (`Test Results == 'Abnormal' AND Admission Type == 'Emergency'`) since EDA showed no actual statistical correlation between these fields in this dataset — documented that honestly instead of pretending there was a data-driven threshold
-- Both capped/validated their inputs and outputs so nothing ever throws an unhandled exception
+`src/orchestrator.py` and `src/main.py` haven't changed yet — the agentic loop and the FastAPI gateway are untouched. This log is specifically about the retrieval layer underneath them.
 
 ---
 
-## Phase 4 — LLM Tool-Calling Orchestration
-**Status:** done
+## Phase 1 — Moving retrieval out of memory, into Qdrant
 
-**Goal:** Get an LLM (via Groq) to actually decide, per question, whether it needs a structured tool, a FAISS search, or just its own general knowledge and connecting them to make tool calling work
+The first real architectural shift: the 32,989 clinical chunks that used to live inside a FAISS index in RAM now live in **Qdrant**, running in a Docker container with a persistent volume mount. That last part matters more than it sounds — without it, deleting or restarting the container would silently wipe every embedded record. With it, the data survives independently of whether my Python process, or even the container itself, is currently running.
 
-**Concepts learned:**
+The migration script (`src/migrate_to_qdrant.py`) reconstructs the vectors straight out of the existing FAISS index, pairs each one with its metadata row, and upserts everything into a single `clinical_notes` collection in batches.
 
-The biggest mental shift in this phase was realizing the API call itself doesn't *execute* anything. The model just tells you, in a structured way, "I want you to call this function with these arguments" — and then it's on my code to actually run it. It's not one request response, it's a loop: ask the model, check if it wants a tool, run the tool myself if so, feed the result back in, ask again, repeat until it gives a real answer.
+One decision worth recording here: I kept the collection's distance metric as **Euclidean**, matching the original `IndexFlatL2` behavior, rather than switching to Cosine. The embeddings were never normalized during the original build, so Euclidean and Cosine would rank results differently — switching metrics silently, mid-migration, would have changed retrieval quality without any visible signal that something had shifted. Migrating storage shouldn't quietly change what the system considers a "good match." That felt like the wrong kind of surprise to introduce.
 
-I sketched the message list by hand for one example question before writing any code, which made the actual loop way less abstract — it's really just building that same list programmatically, round by round.
+## Phase 2 — Filtering inside the database, not after it
 
-Tool descriptions turned out to be a bigger deal than I expected. A vague description like "does math operations" isn't enough — the model needs to know both when *to* use a tool and when *not to*, or it'll misroute questions like "what is diabetes" into a stats call that makes no sense.
+Every point in `clinical_notes` carries a payload: `record_index`, `bucket_name`, `chunk_position`, and the actual `text`. A payload index was added on `bucket_name`, which turns filtering from "check all 32,989 records one at a time" into a near-instant lookup.
 
-I decided to expose FAISS search as a third *tool*, callable on demand, rather than always running retrieval on every question. That was a deliberate token/latency tradeoff — running a vector search for a pure calculation question wastes time and context for no benefit, so letting the model choose keeps the system efficient.
+The difference isn't theoretical — I tested it directly. Querying *"asthma treatment"* without any filter returned a mix of real treatment notes and short one-line diagnostic summaries — technically related, practically useless to a doctor looking for what was actually prescribed. The same query, filtered to `bucket_name == "transcription"`, returned only substantive clinical narrative. That's the whole argument for pre-filtering in one side-by-side comparison: broad semantic similarity isn't the same thing as *useful* similarity, and filtering at the database level is what closes that gap — rather than fetching a small batch and hoping enough of it survives a filter applied afterward.
 
-
-**Why this matters specifically once FastAPI enters the picture:** the orchestrator's `ask()` function is a single, self-contained entry point — call it with a question, get an answer back. That's exactly the shape FastAPI needs to wrap around an endpoint; none of the tool-calling complexity needs to leak into the API layer at all.
-
-**Why it matters for scaling later:** the `TOOL_REGISTRY` dispatch pattern means adding a new tool later is just: write the function, add one line mapping its name to a lambda that injects the dataframe, add its schema. Nothing else about the loop changes.
-
-**What I built:**
-- Tool schemas (name, description, JSON-schema parameters) for all three tools, written to be specific about when each should and shouldn't fire
-- `TOOL_REGISTRY` — a name-to-function dispatch map using lambdas to inject the shared dataframe invisibly, so the LLM never needs to know it exists
-- `search_patient_records()` — FAISS search wrapped as a third tool, same `status`-dict return shape as the other two
-- `ask()` — the full orchestration loop: build messages, call Groq, check for tool calls vs. final answer, execute requested tools, feed results back, repeat up to a max-round safety cap so a confused model can't loop forever
+`chunk_metadata.csv` is now effectively retired — everything it held lives natively in Qdrant's payload.
 
 ---
 
-## Phase 5 — FastAPI Endpoint
-**Status:** done
+## What's still ahead
 
-**Goal:** Turn the orchestrator into an actual service — something that starts up once, stays ready, and answers questions over HTTP instead of only running from a Python script.
+The hand-written RRF fusion in `embeddings.py` hasn't moved yet — that's the next piece, once dense and sparse vectors both live natively inside Qdrant instead of two separate indexes glued together in Python. After that: cross-encoder reranking to tighten precision on the final candidates before they ever reach the LLM, and a self-correcting retrieval loop that can detect a bad retrieval and retry with a reformulated query rather than silently returning a weak answer.
 
-**Concepts learned:**
+---
 
-Pydantic models aren't just type hints, they're validation happening automatically before my code even runs. Setting `min_length=1` on the question field means an empty string gets rejected at the door, with a clean 422, before it ever reaches the orchestrator, the Groq API, or any tool.That ensres that wrong errorful messages or values dont flow through the systems and are discarded immediately.
+## Execution Interface
 
-The concept I had to actually go learn for this phase was `lifespan`. Before this, my instinct was that lazy loading (loading resources on first use) was good enough — and it is, for correctness. But it means the very first user to hit the API eats the full cost of loading a 55K-row dataset and a FAISS index while they wait. `lifespan` runs setup code once, at server startup, before any request is accepted, so by the time anyone can actually call `/ask`, everything's already warm. The `yield` inside it is the same idea as a context manager — code above the yield is setup, code below is shutdown/cleanup, and the server just runs in between.(This learning was purely done using Claude AI.I still face issue in this and would be going deep)
+```bash
+# 1. Prepare clinical text records
+python src/data_prep.py
 
+# 2. Generate embeddings and construct FAISS index
+python src/embeddings.py
 
-**Why this matters for scaling later:** the `/ask` endpoint doesn't know or care that there's a multi-round tool-calling loop, a FAISS index, or three separate tools underneath it — it just calls `ask()` and returns the result. If the orchestration logic changes completely later, the API layer doesn't have to.
+# 3. Run Qdrant (Docker, persistent storage)
+docker run -d --name qdrant -p 6333:6333 -v ./qdrant_storage:/qdrant/storage qdrant/qdrant
 
-**What I built:**
-- `AskRequest` / `AskResponse` — Pydantic models with field validation on the question
-- `lifespan` — eager loading of the dataframe, FAISS index, and snippets at server startup instead of on first request
-- `POST /ask` — calls the orchestrator, wraps the answer, and returns a clean generic error (not a raw exception) if anything fails
-- `GET /health` — a lightweight endpoint separate from the expensive path, so the service's liveness can be checked without triggering a full LLM round trip
+# 4. Migrate embeddings into Qdrant
+python src/migrate_to_qdrant.py
 
-
-
-
-
-
-## Scaling HealthInsight: Exploring New Search Techniques
-
-As a next step beyond the initial 5 phases, this project is being scaled to explore
-different retrieval strategies within the RAG pipeline. The first technique implemented is **hybrid search**.
-
-### Why hybrid search
-
-The original retrieval path used only dense vector search (FAISS `IndexFlatL2`
-over MiniLM embeddings). Vector search is strong at matching *meaning* — a query
-like "patients with heart problems" will correctly surface records mentioning
-cardiac conditions even without an exact word match. But it's weaker at *exact*
-terms: patient IDs, precise medical condition names, or hospital names can rank
-poorly if their embedding isn't "semantically close" to the query, even when the
-literal word is right there in the text.
-
-Hybrid search fixes this by running two retrieval methods in parallel and merging
-the results:
-
-- **Dense retrieval (FAISS)** — unchanged from before, finds semantically similar snippets.
-- **Sparse retrieval (BM25)** — a keyword-based ranking algorithm (via `rank_bm25`)
-  that scores documents on exact term overlap with the query.
-
-The two ranked lists are combined using **Reciprocal Rank Fusion (RRF)**, which
-merges them by rank position rather than raw score 
-
-### How it works now
-
-`src/embeddings.py` now exposes:
-- `build_bm25_index(df)` — builds a BM25 index over the same snippets used for FAISS
-- `embed_query(query_text)` — embeds a live user query
-- `reciprocal_rank_fusion(...)` — merges FAISS and BM25 ranked results
-- `hybrid_search(query_text, faiss_index, bm25_index, df, k, candidates)` — the full
-  pipeline: embed + search both indexes, fuse, return top-k matching rows
-
-The BM25 index is rebuilt from `snippets.csv` at startup rather than saved to disk,
-since rebuilding it is cheap even at ~55,500 rows.
-
-### What this means for the bot
-
-Once wired into the orchestrator's `search_patient_records` tool, the assistant will
-be able to correctly retrieve records for exact-term queries (patient IDs, specific
-condition names) that pure vector search could previously miss, while keeping the
-existing semantic search strength for descriptive, natural-language questions.
-
-### Wiring into Orchestrator (`src/orchestrator.py`)
-
-The orchestrator has been updated to integrate the hybrid retrieval pipeline into the Groq tool-calling loop:
-
-- **Startup & Resource Management:** `_load_resources()` now lazy-loads the FAISS index, raw dataset, and snippets DataFrame, while building the `BM25Okapi` index in memory on startup via `build_bm25_index(_snippets_df)`.
-- **Hybrid Tool Execution:** `search_patient_records` was upgraded from pure FAISS search to call `hybrid_search(...)`, querying both FAISS and BM25 simultaneously and returning fused RRF candidate records.
-
-
-**Status:** Core hybrid search is fully wired and integrated into `orchestrator.py`.
-
-## Scaling HealthInsight: Chunking for Unstructured Clinical Text
-
-After hybrid search, the next scaling module was **chunking** — handling
-long, unstructured clinical documents that the original pipeline was never
-designed for.
-
-### Why chunking was needed
-
-The original snippets (`data/processed/snippets.csv`) are short, structured
-sentences built from one patient row each — they comfortably fit inside
-`all-MiniLM-L6-v2`'s 256-token limit, so chunking was never a decision point.
-
-But clinical transcription notes are different: long, free-text, and
-inconsistent in structure. Embedding a whole transcription as one vector
-causes two problems — it either gets silently truncated past 256 tokens, or
-the vector becomes a diluted "average" of too many unrelated ideas (history,
-medications, plan, allergies all blurred into one meaning), which hurts
-retrieval accuracy. Chunking splits these documents into smaller, focused
-pieces so each one embeds cleanly and stays retrievable on its own.
-
-### How chunking works
-
-Implemented as a **two-pass strategy** in the new `src/document_prep.py`:
-
-- **First pass — split by section.** Clinical notes follow a semi-consistent
-  SOAP-style structure (`SUBJECTIVE:`, `PAST MEDICAL HISTORY:`, `PLAN:`,
-  etc.). A regex finds these header labels dynamically per record — no fixed
-  set of expected sections, since some records skip sections entirely (e.g.
-  no `PLAN`).
-- **Second pass — recursive sub-split, only when needed.** If a section is
-  still over the 256-token limit after step one (checked using the real
-  MiniLM tokenizer, not character count), it gets recursively split further
-  using `langchain_text_splitters.RecursiveCharacterTextSplitter`.
-
-Every chunk keeps metadata tying it back to where it came from — which
-record, which section, and its position within that section — since a chunk
-retrieved in isolation is meaningless without knowing its source.
-
-### What was built
-
-- `process_clinical_transcription()` — first-pass section splitter +
-  second-pass recursive fallback for any section over the token limit
-- `process_single_record()` — applies column-specific chunking rules per
-  patient record (description, medical specialty, transcription, keywords)
-- `prepare_all_chunks()` — runs chunking across the whole dataset and
-  flattens the output into one list of `{record_index, bucket_name,
-  chunk_position, text}` records, ready for embedding
-
-`src/embeddings.py` was generalized so `generate_embeddings()` and
-`build_bm25_index()` now accept a plain list of text instead of assuming a
-`Snippet` column — the same functions now build a **second, separate FAISS +
-BM25 index** just for chunks, plus `save_chunk_metadata()` /
-`load_chunk_metadata()` so a retrieved chunk can always be traced back to its
-source record and section.
-
-### Wiring into the orchestrator
-
-`src/orchestrator.py` gained a new tool, `search_clinical_documents`, run
-through the same hybrid search + RRF pipeline as `search_patient_records`,
-but over the chunk index. The LLM now decides between two retrieval tools
-depending on whether a question needs a short structured fact
-(`search_patient_records`) or detail buried in a longer clinical note
-(`search_clinical_documents`).
-
-**Status:** Chunking implemented and validated on sample records; wired into
-the orchestrator as a second hybrid-search tool.
+# 5. Launch production API server
+uvicorn src.main:app --reload --port 8000
+```

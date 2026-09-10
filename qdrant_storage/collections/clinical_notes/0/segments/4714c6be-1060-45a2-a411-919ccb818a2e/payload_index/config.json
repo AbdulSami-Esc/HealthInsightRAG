@@ -1,0 +1,1 @@
+{"indexed_fields":{"bucket_name":"keyword"},"indexed_types":{"bucket_name":[{"index_type":"keyword_index","mutability":"immutable","storage_type":{"mmap":{"is_on_disk":false}}},{"index_type":"null_index","mutability":"immutable","storage_type":{"mmap":{"is_on_disk":false}}}]}}
