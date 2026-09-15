@@ -2,6 +2,8 @@ import pandas as pd
 import re
 from transformers import AutoTokenizer
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+import os
+from pathlib import Path
 
 MAX_CHUNK_SIZE = 256
 
@@ -67,6 +69,9 @@ def process_single_record(row):
 
 
 def prepare_all_chunks(df):
+    # 1. ADD THIS EXACT LINE HERE to format the IDs
+    df['index'] = "P" + df['index'].astype(str).str.zfill(4)
+    
     flattened_chunks = []
     
     for idx, row in df.iterrows():
@@ -75,10 +80,35 @@ def prepare_all_chunks(df):
         for bucket_name, chunks in buckets.items():
             for chunk_pos, chunk_text in enumerate(chunks):
                 flattened_chunks.append({
-                    "record_index": idx,
+                    # 2. CHANGE 'idx' to "row['index']" HERE
+                    "record_index": row['index'],
                     "bucket_name": bucket_name,
                     "chunk_position": chunk_pos,
                     "text": chunk_text
                 })
                 
     return flattened_chunks
+
+
+
+
+
+if __name__ == "__main__":
+    print("Loading raw clinical dataset (mtsamples.csv)...")
+    base_dir = Path(__file__).resolve().parent.parent
+    
+    # Load raw data
+    raw_path = base_dir / "data" / "unstructured" / "raw" / "mtsamples.csv"
+    raw_df = pd.read_csv(raw_path)
+
+    print("Executing chunking and formatting Patient IDs...")
+    chunks = prepare_all_chunks(raw_df)
+
+    # Save to processed folder
+    processed_dir = base_dir / "data" / "unstructured" / "processed"
+    processed_dir.mkdir(parents=True, exist_ok=True)
+    
+    output_path = processed_dir / "chunk_metadata.csv"
+    pd.DataFrame(chunks).to_csv(output_path, index=False)
+    
+    print(f"Success! Formatted chunk metadata saved to {output_path}")

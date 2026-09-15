@@ -1,107 +1,78 @@
-import os
-from unittest import result
-import faiss
 import pandas as pd
-from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, PointStruct, VectorParams
-from qdrant_client.models import Filter, FieldCondition, MatchValue
-from sentence_transformers import SentenceTransformer
+from qdrant_client import QdrantClient, models
+from pathlib import Path
+from tqdm import tqdm
 
+BASE_DIR = Path(__file__).resolve().parent.parent
+CSV_PATH = BASE_DIR / "data" / "unstructured" / "processed" / "chunk_metadata.csv"
 
+def migrate_to_hybrid_qdrant():
+    print("Initializing Qdrant Client...")
+    client = QdrantClient(url="http://localhost:6333")
+    COLLECTION_NAME = "clinical_notes"
 
-##using os to built the whole file path for chunk_faiss_index and chunk_metadata
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-INDEX_PATH = os.path.join(
-    BASE_DIR, "data", "unstructured", "processed", "chunk_faiss_index.bin"
-)
-CSV_PATH = os.path.join(
-    BASE_DIR, "data", "unstructured", "processed", "chunk_metadata.csv"
-)
+    # Define our models here instead of using client.set_model
+    dense_model = "sentence-transformers/all-MiniLM-L6-v2"
+    sparse_model = "Qdrant/bm25"
 
+    # 1. Wipe the old collection
+    if client.collection_exists(collection_name=COLLECTION_NAME):
+        print(f"Deleting old collection '{COLLECTION_NAME}' to start fresh...")
+        client.delete_collection(collection_name=COLLECTION_NAME)
 
-print(f"Loading FAISS index from {INDEX_PATH}...")
-faiss_index = faiss.read_index(INDEX_PATH)
-
-# Reconstruct all vectors into a NumPy array
-total_vectors = faiss_index.ntotal
-print(f"Extracting {total_vectors} vectors from FAISS index...")
-vectors = faiss_index.reconstruct_n(0, total_vectors)
-
-print(f"Loading metadata from {CSV_PATH}...")
-df_metadata = pd.read_csv(CSV_PATH)
-
-if len(df_metadata) != total_vectors:
-    raise ValueError(
-        f"Mismatch: FAISS contains {total_vectors} vectors, "
-        f"but CSV contains {len(df_metadata)} rows."
-    )
-
-
-client = QdrantClient(url="http://localhost:6333")
-COLLECTION_NAME = "clinical_notes"
-VECTOR_DIM = vectors.shape[1]  # 384 for MiniLM
-
-# Recreate collection if already existing, or create if not present
-if not client.collection_exists(collection_name=COLLECTION_NAME):
+    # 2. Create the new collection with hybrid configuration
+    print(f"Creating new hybrid collection '{COLLECTION_NAME}'...")
     client.create_collection(
         collection_name=COLLECTION_NAME,
-        vectors_config=VectorParams(size=VECTOR_DIM, distance=Distance.EUCLID),
+        vectors_config={
+            "dense": models.VectorParams(
+                size=384,  # The size for all-MiniLM-L6-v2
+                distance=models.Distance.COSINE
+            )
+        },
+        sparse_vectors_config={
+            "sparse": models.SparseVectorParams(modifier=models.Modifier.IDF)
+        }
     )
-    print(f"Created collection '{COLLECTION_NAME}' with dimension {VECTOR_DIM}.")
-else:
-    print(f"Collection '{COLLECTION_NAME}' already exists.")
 
-
-BATCH_SIZE = 500
-records = df_metadata.to_dict(orient="records")
-
-print(f"Beginning upsert of {total_vectors} records in batches of {BATCH_SIZE}...")
-
-for start_idx in range(0, total_vectors, BATCH_SIZE):
-    end_idx = min(start_idx + BATCH_SIZE, total_vectors)
-    batch_points = []
-
-    for i in range(start_idx, end_idx):
-        item = records[i]
+    # 3. Load the chunk data
+    print(f"Loading chunks from {CSV_PATH}...")
+    df_metadata = pd.read_csv(CSV_PATH)
+    
+    documents = []
+    metadata = []
+    
+    for idx, row in df_metadata.iterrows():
+        text = str(row['text'])
         
-        point = PointStruct(
-            id=i,
-            vector=vectors[i].tolist(),
-            payload={
-                "record_index": item.get("record_index"),
-                "bucket_name": item.get("bucket_name"),
-                "chunk_position": item.get("chunk_position"),
-                "text": item.get("text"),
-            },
-        )
-        batch_points.append(point)
+        # We explicitly tell FastEmbed which model to use for each chunk right here
+        documents.append({
+            "dense": models.Document(text=text, model=dense_model),
+            "sparse": models.Document(text=text, model=sparse_model),
+        })
+        
+        metadata.append({
+            "record_index": str(row.get("record_index")), # This ensures P0001 is a string
+            "bucket_name": str(row.get("bucket_name")),
+            "chunk_position": row.get("chunk_position"),
+            "text": text,
+        })
 
-    client.upsert(
+    # 4. Embed and Upload using batch processing
+    print(f"Embedding and upserting chunks using FastEmbed. This might take a minute...")
+    client.upload_collection(
         collection_name=COLLECTION_NAME,
-        points=batch_points,
-        wait=True,
+        vectors=tqdm(documents, desc="Uploading Hybrid Vectors"),
+        payload=metadata,
+        parallel=4 # Uses CPU cores for faster encoding
     )
-    print(f"Upserted {end_idx}/{total_vectors} records...")
+    
+    # 5. Create Payload Indexes for our Stage 2 strict pre-filtering
+    print("Building metadata payload indexes...")
+    client.create_payload_index(COLLECTION_NAME, field_name="record_index", field_schema="keyword")
+    client.create_payload_index(COLLECTION_NAME, field_name="bucket_name", field_schema="keyword")
+    
+    print("Migration complete! Database is now hybrid-ready.")
 
-print("Migration completed successfully.")
-
-client.create_payload_index(
-    collection_name="clinical_notes",
-    field_name="bucket_name",
-    field_schema="keyword"
-)
-
-model = SentenceTransformer("all-MiniLM-L6-v2")
-
-query_text = "asthma treatment"
-query_vector = model.encode(query_text).tolist()
-results = client.query_points(
-    collection_name="clinical_notes",
-    query=query_vector,  # you generate this from your query text
-    query_filter=Filter(
-        must=[FieldCondition(key="bucket_name", match=MatchValue(value="transcription"))]
-    ),
-    limit=5
-)
-
-print(results)
+if __name__ == "__main__":
+    migrate_to_hybrid_qdrant()
