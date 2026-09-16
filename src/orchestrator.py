@@ -2,6 +2,7 @@ import sys
 import os
 from pathlib import Path
 
+
 # 1. Resolve project root (HealthInsightRAG) and src directories dynamically
 CURRENT_FILE = Path(__file__).resolve()
 SRC_DIR = CURRENT_FILE.parent
@@ -21,9 +22,9 @@ from fastembed import TextEmbedding, SparseTextEmbedding
 
 # 3. Direct import because reranker.py lives in the same folder
 try:
-    from src.reranker import rerank
+    from src.reranker import rerank, load_reranker_model
 except ModuleNotFoundError:
-    from reranker import rerank
+    from reranker import rerank, load_reranker_model
 
 import pandas as pd
 from langchain_experimental.agents import create_pandas_dataframe_agent
@@ -222,33 +223,43 @@ def search_clinical_cohorts(query: str, top_k: int = DEFAULT_FINAL_TOP_K) -> dic
     }
 
 def answer_analytical_query(question: str) -> str:
-    """Lane 4: Bypasses Qdrant entirely and executes Pandas operations on the CSV."""
+    """Lane 4: Bypasses Qdrant entirely and dynamically executes native Pandas operations."""
     csv_path = BASE_DIR / "data" / "unstructured" / "processed" / "chunk_metadata.csv"
     df = pd.read_csv(csv_path)
-    
-    llm = ChatGroq(
-        api_key=os.environ["GROQ_API_KEY"], 
-        model_name="llama3-70b-8192", 
-        temperature=0
+
+    prompt = (
+        f"You are an expert Data Analyst. A pandas DataFrame 'df' is loaded in memory. "
+        f"The columns are: {list(df.columns)}\n"
+        f"Write EXACTLY the Python pandas code to answer this question: '{question}'\n"
+        f"Do NOT include markdown, backticks, explanations, or print statements. ONLY raw python code. "
+        f"You MUST assign the final textual or numerical answer to a variable named 'result'."
     )
-    
-    agent = create_pandas_dataframe_agent(
-        llm, 
-        df, 
-        verbose=True, 
-        allow_dangerous_code=True
-    )
-    
+
     try:
-        return agent.run(question)
+        # Use the global working client and gpt-oss-120b
+        response = client.chat.completions.create(
+            model=MODEL_NAME, 
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0
+        )
+        
+        # Strip any accidental markdown formatting from the LLM
+        code = response.choices[0].message.content.strip()
+        code = code.replace("```python", "").replace("```", "").strip()
+        
+        # Execute the pandas code dynamically
+        local_vars = {"df": df, "pd": pd}
+        exec(code, {}, local_vars)
+        
+        return str(local_vars.get("result", "Execution successful, but no 'result' variable was created."))
     except Exception as e:
-        return f"Error executing analytical math: {str(e)}"
+        return f"Error executing analytical math: {str(e)}\nAttempted Code:\n{code}"
+
 
 # ReAct loop elements
 TOOL_REGISTRY = {
     "search_clinical_documents": lambda **kwargs: search_clinical_documents(**kwargs),
 }
-
 def ask(user_question: str, max_rounds: int = 5) -> str:
     """ReAct execution loop."""
     _load_resources()
@@ -330,6 +341,8 @@ def ask(user_question: str, max_rounds: int = 5) -> str:
 
 
 if __name__ == "__main__":
+    load_reranker_model()
+
     print("--- Test 1: Direct Medical Knowledge ---")
     print(ask("What are common complications of untreated hypertension?"))
 

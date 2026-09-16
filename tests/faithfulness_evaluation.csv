@@ -1,0 +1,102 @@
+query,target_id,final_answer,faithfulness_score,judge_reasoning
+What medications was patient P0001 prescribed upon discharge?,P0001,"Patient P0001 was not prescribed any medications at discharge. The clinical transcription notes list **“CURRENT MEDICATIONS: None.”**【{""record_index"":""P0001"",""section"":""transcription""}】",PASS,"The answer only states that no medications were prescribed, which is directly supported by the retrieved context's 'CURRENT MEDICATIONS: None.'"
+Summarize the operative report for P0015.,P0015,"**Operative Report Summary – Patient P0015**
+
+- **Procedures Planned**  
+  1. **Laparoscopic gastric banding (Lap‑Band)** – intended as a bariatric weight‑loss operation.  
+  2. **Laparoscopic cholecystectomy** – indicated for cholelithiasis, to be performed prior to the bariatric surgery.
+
+- **Pre‑operative Preparation**  
+  - Patient was placed on a **two‑week Optifast regimen** (~900 kcal/day) to reduce hepatic size and improve operative safety.  
+  - All pre‑operative labs, imaging, and the surgical consent forms (Fairfield County Bariatrics consent and St. Vincent’s Hospital consent) were reviewed and signed.  
+  - The patient completed the required **pre‑operative quiz** and demonstrated adequate understanding.
+
+- **Informed Consent & Risk Discussion**  
+  The surgeon reviewed, in detail, the potential complications of both procedures, including:
+  - Bleeding, infection, deep‑venous thrombosis, and pulmonary embolism.  
+  - Specific organ‑related risks: injury to the esophagus, stomach, small and large intestines, spleen, liver, cystic duct, common bile duct; band slippage, erosion, or need for revision; and possible need for ERCP or further surgery.  
+  - The patient acknowledged comprehension of these risks and agreed to proceed.
+
+- **Planned Operative Date**  
+  - **October 6** (both the cholecystectomy and the subsequent laparoscopic gastric banding are scheduled for this date).
+
+- **Current Status**  
+  - All pre‑operative instructions have been reviewed, signed, and the patient is cleared for surgery.  
+  - No intra‑operative details are available yet, as the case is still in the planning phase.",FAIL,"The answer adds details not in the context, such as pre‑operative labs/imaging and stating both procedures are scheduled for October 6, which the retrieved text does not explicitly confirm."
+What were the findings of the chest CT scan for P0042?,P0042,"The clinical transcription for **P0042** that is indexed in the system does not contain a chest CT‑scan report. The only imaging study available for this patient is a testicular ultrasound, which details the size and vascularity of the left and right testicles and notes bilateral hydroceles (see the “TESTICULAR ULTRASOUND” section of the transcription). 
+
+Because no chest CT scan findings are present in the retrieved clinical notes for P0042, we cannot provide a description of such results. If a chest CT was performed elsewhere or documented in a different set of notes, those records would need to be accessed to obtain the findings.",PASS,"The answer only states that no chest CT findings are present and references the testicular ultrasound, which aligns with the retrieved context and adds no external information."
+Review the physical examination notes for patient P0104.,P0104,"**Physical Examination Summary – Patient P0104**
+
+| Finding | Details from the record |
+|---------|--------------------------|
+| **Age / Sex** | 7‑year‑old male (identified in the operative indication) |
+| **Inguinal region** | A “fairly sizeable right inguinal hernia and hydrocele” was noted on physical exam. A second, smaller lesion was identified on the left side during the same examination. |
+| **Scrotum/Testes** | Both testes were reported as **well‑descended** after the operative repair; the pre‑operative note does not describe any abnormal positioning or masses beyond the hydroceles. |
+| **Other systems** | No additional systemic or vital‑sign findings are documented in the available transcription. |
+
+**Source citations**
+
+- The operative indication notes that the patient “was found to have a second smaller one on evaluation with ultrasound and **physical exam**” (pre‑operative diagnosis section)【0†section=transcription】.  
+- The same section describes the primary findings as “**fairly sizeable right inguinal hernia and hydrocele**”【0†section=transcription】.
+
+*Interpretation*: The available clinical transcription for P0104 includes only the focused abdominal‑groin physical examination that identified bilateral inguinal hernias with associated hydroceles. No broader physical‑exam details (e.g., vitals, cardiac, pulmonary) are present in the retrieved notes.",PASS,"All statements in the answer are directly supported by the retrieved operative and pre‑operative notes, with no extra or invented information."
+Did patient P0023 have any recorded drug allergies?,P0023,"The operative transcription for **patient P0023** does not contain any mention of drug allergies. The note details the vasectomy procedure, anesthetic used (0.25 % Marcaine without epinephrine), and intra‑operative events, but there is no section that records an allergy history or any specific drug hypersensitivity. Therefore, based on the available clinical document, **no drug allergies were documented for this patient**.",PASS,The answer only restates that the provided note contains no allergy information and does not add any unsupported facts.
+What was the initial diagnosis for patient P0088?,P0088,The initial (pre‑operative) diagnosis for patient **P0088** was **bilateral undescended testes**【0†section=transcription】.,PASS,The answer only states the pre‑operative diagnosis which is explicitly present in the retrieved context.
+Retrieve the post-operative recovery plan for P0201.,P0201,"**Post‑operative recovery plan for P0201 (vasectomy):**  
+
+- After the procedure the wound was closed with 4‑0 Vicryl sutures and a sterile dressing was applied.  
+- The patient was awakened and transferred to the recovery room in stable condition for post‑operative monitoring.  
+
+*Source: Transcription section for record P0201.*",PASS,"All details in the answer are directly stated in the retrieved context, with no added information."
+What was the blood pressure reading during admission for P0005?,P0005,"The clinical transcription notes retrieved for **P0005** contain detailed operative descriptions but do **not** include any recorded admission vital signs, such as a blood‑pressure measurement. Consequently, the admission blood‑pressure reading for this patient is not documented in the available records.",PASS,"The answer only states that no blood pressure reading is documented, which aligns with the retrieved context and adds no external information."
+Show me the family medical history mentioned in P0310.,P0310,"The clinical transcription for **record P0310** does not contain any mention of the patient’s family medical history.  
+
+- The first retrieved excerpt (the **pre‑operative/indication** section) details the patient’s current pregnancy status, presenting symptoms, laboratory values and the discussion of management options, but it includes no information about relatives or hereditary conditions.  
+- The second excerpt (the **procedure note**) describes the operative steps of the suction dilation and curettage and likewise contains no reference to family history.
+
+Therefore, based on the available clinical notes for P0310, a family medical history was either not elicited or not recorded in the document.",ERROR,"Error code: 429 - {'error': {'message': 'Rate limit reached for model `openai/gpt-oss-120b` in organization `org_01kpr476zcez080fa7qzzcptat` service tier `on_demand` on tokens per minute (TPM): Limit 8000, Used 6519, Requested 1713. Please try again in 1.74s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}"
+What dosage of lisinopril was given to patient P0012?,P0012,,ERROR,Error code: 429 - {'error': {'message': 
+What was the primary complaint for patient P0111?,P0111,The chart notes indicate that the patient’s presenting problem—and thus the primary complaint—was **penoscrotal hypospadias (with associated chordee)**. This is stated in the “INDICATIONS FOR OPERATION” section of the pre‑operative documentation for record P0111【0†section=transcription】.,PASS,"The answer only states penoscrotal hypospadias with chordee, which is explicitly mentioned in the retrieved context."
+Did patient P0222 require intubation during the procedure?,P0222,"The operative note for **patient P0222** states that the case was performed **“under general anesthesia.”** However, the transcription does not contain any explicit mention of endotracheal intubation or airway instrumentation (e.g., “intubated,” “endotracheal tube placed,” or similar phrasing).  
+
+**Conclusion:** The clinical documentation does not record that patient P0222 was intubated during the procedure; it only notes that general anesthesia was administered.  
+
+*Source: Procedure transcription for P0222, section “transcription”* (lines describing “Under general anesthesia, the patient was prepped and draped…”).",ERROR,"Error code: 429 - {'error': {'message': 'Rate limit reached for model `openai/gpt-oss-120b` in organization `org_01kpr476zcez080fa7qzzcptat` service tier `on_demand` on tokens per minute (TPM): Limit 8000, Used 6578, Requested 1667. Please try again in 1.8375s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}"
+What were the lab results for hemoglobin for patient P0333?,P0333,"The clinical documents retrieved for patient P0333 contain only operative and procedural notes; they do not include any laboratory data or a reported hemoglobin value. Consequently, the hemoglobin result for this patient is not available in the provided records.",PASS,"The answer only states that hemoglobin data is absent, which aligns with the retrieved context and adds no external information."
+Was patient P0444 referred to physical therapy?,P0444,"The clinical transcription for **P0444** documents an uncomplicated phacoemulsification with intra‑ocular lens placement.  The notes describe the surgical steps, anesthesia, and postoperative eye‑care (TobraDex ointment, eye pad, Fox shield) but **make no mention of a referral to physical therapy** or any related rehabilitation recommendation.  
+
+**Conclusion:** Based on the available record, P0444 was **not** referred to physical therapy.",PASS,"The answer only states that no referral to physical therapy is mentioned, which aligns with the provided context and adds no external information."
+What surgical instruments were used for patient P0555?,P0555,"**Surgical/Procedural instruments documented for patient P0555**
+
+| Instrument / Device | How it was used (as recorded) | Source |
+|---------------------|------------------------------|--------|
+| **Fluoroscopy machine** (x‑ray unit) | Operated by the x‑ray technician to identify bony landmarks and confirm needle placement under AP and lateral radiographs. | “The x‑ray technician was supervised and instructed to operate the fluoroscopy machine… Fluoroscopy was used to identify the boney landmarks… Needle localization was confirmed with AP and lateral radiographs.” (transcription) |
+| **Teflon‑coated needle** | Gently guided under fluoroscopic guidance to the medial branch nerve region; the tip was inserted to bone at the groove between transverse and superior articular processes. | “With fluoroscopy, a Teflon coated needle … was gently guided into the region of the Medial Branch nerves … Needle tip was inserted to the bone …” (transcription) |
+| **Needle trocar** (used with the Teflon‑coated needle) | Removed after positioning; a syringe was attached for lidocaine injection. | “Following this, the needle Trocar was removed and a syringe containing 1% lidocaine was attached.” (transcription) |
+| **Syringe (1 % lidocaine)** | Connected to the trocar/needle to aspirate and then inject 1 cc of lidocaine before lesion creation. | Same passage as above. |
+| **Sterile drapes** (part of sterile field) | Covered the patient leaving a small window for needle insertion. | “The area was covered with sterile drapes, leaving a small window opening for needle placement.” (transcription) |
+
+*No other surgical instruments (e.g., scalpels, forceps, retractors) were mentioned in the available transcription for this procedure.*",PASS,All listed instruments and their described uses are directly supported by the retrieved context with no extraneous information.
+Summarize the discharge instructions for P0666.,P0666,"The operative record for **P0666** does not contain a dedicated “Discharge Instructions” section. The only post‑procedure details that could be relevant to discharge planning are found in the operative note itself:
+
+* After component implantation, the wound was irrigated, inspected (no debris), and closed in layers.  
+* A surgical drain was placed in the depth of the wound.  
+* The skin was closed with surgical clips and the extremity was dressed with a padded ABD dressing and an Ace‑wrap.  
+* At the end of the case distal pulses were intact, toes were pink and warm with good capillary refill, and neurovascular status was confirmed.  
+* A postoperative X‑ray showed satisfactory prosthetic alignment, and the prognosis was noted as good for the 79‑year‑old female patient.  
+
+**Key points that would normally be included in discharge instructions (based on the operative note):**
+
+1. **Wound care** – keep the padded dressing and Ace‑wrap clean and dry; monitor for drainage from the surgical drain.  
+2. **Drain management** – observe the amount and character of drain output and report any sudden increase or signs of infection.  
+3. **Neurovascular status** – continue to check that the toes remain pink, warm, and that distal pulses are present.  
+4. **Activity** – avoid excessive knee flexion or loading that could place undue tension on the repair; follow the surgeon‑provided weight‑bearing and range‑of‑motion protocol (not detailed in the note).  
+5. **Pain control** – use prescribed analgesics as directed (specific medications not listed in the note).  
+6. **Follow‑up** – schedule postoperative appointments for wound inspection, drain removal, and radiographic evaluation (exact dates not provided in the note).  
+
+Because the document does not list explicit discharge instructions, the above items are inferred from the intra‑operative and immediate postoperative details documented in the operative note for P0666.",FAIL,"The answer adds inferred discharge instructions (e.g., keep dressing clean, monitor drain output, activity restrictions, pain medication, follow‑up schedule) that are not explicitly stated in the retrieved context."
+What was the estimated blood loss during P0777's surgery?,P0777,"The operative note for patient **P0777** records an **estimated blood loss of 400 cc**【{""source"":""search_results"",""index"":0,""section"":""transcription""}】.",PASS,"The answer correctly states the estimated blood loss of 400 cc, which is directly provided in the retrieved context and includes no extraneous information."
+Did patient P0888 have a history of smoking?,P0888,"The operative note for patient P0888 contains no mention of a smoking history or any social‑history details about tobacco use. Based on the retrieved documentation, there is no recorded evidence that this patient has a history of smoking.",PASS,"The answer only states that the retrieved operative note contains no smoking history, which aligns with the provided context and adds no external information."
+What anesthesia was administered to P0999?,P0999,The anesthesia administered to patient **P0999** was **intravenous (IV) sedation** provided by the Anesthesia Department【0†section:transcription】.,PASS,"The answer correctly states IV sedation by the Anesthesia Department, which is explicitly mentioned in the retrieved context."
+List the post-op vital signs for patient P1000.,P1000,"The clinical transcription for patient **P1000** does not include any documented post‑operative vital‑sign measurements. The procedure note details the colonoscopy, findings, and postoperative diagnosis, but no blood pressure, heart rate, respiratory rate, temperature, or oxygen‑saturation values are recorded in the retrieved sections.",PASS,"The answer only states that no post‑operative vital signs are recorded, which matches the retrieved context."

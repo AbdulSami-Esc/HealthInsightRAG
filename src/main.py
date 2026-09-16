@@ -22,7 +22,7 @@ from src.reranker import load_reranker_model
 
 client = Groq(api_key=os.environ["GROQ_API_KEY"])
 MODEL_NAME = "openai/gpt-oss-120b"
-ROUTER_MODEL = "llama3-8b-8192"
+ROUTER_MODEL = "openai/gpt-oss-120b"
 
 class AskRequest(BaseModel):
     question: str = Field(..., min_length=1)

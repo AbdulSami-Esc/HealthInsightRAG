@@ -1,0 +1,6 @@
+query,target_id,chunks_retrieved,leak_detected,match_status
+What medications was this patient prescribed?,P1001,2,SECURE,PASS
+Summarize the operative report.,P0015,3,SECURE,PASS
+What were the findings of the chest CT scan?,P2031,3,SECURE,PASS
+Review the physical examination notes.,P3781,2,SECURE,PASS
+Any recorded drug allergies?,P0023,2,SECURE,PASS
