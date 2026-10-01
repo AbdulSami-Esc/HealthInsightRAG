@@ -2,7 +2,6 @@ import sys
 import os
 from pathlib import Path
 
-
 # 1. Resolve project root (HealthInsightRAG) and src directories dynamically
 CURRENT_FILE = Path(__file__).resolve()
 SRC_DIR = CURRENT_FILE.parent
@@ -47,7 +46,9 @@ SYSTEM_PROMPT = (
     "You have access to a hybrid search tool that indexes detailed clinical transcription notes. "
     "Use the search_clinical_documents tool whenever the user asks for specific clinical "
     "details about a specific patient. "
-    "You MUST extract the record index (e.g., 'P0001', 'P1200') from the user's prompt and pass it to the search tool. "
+    "You MUST extract the patient ID (e.g., 'P01854') from the user's prompt and pass it to the search tool. "
+    "Once you have called the tool for a given patient and query and received results, do NOT call it "
+    "again with the same patient and query — synthesize your final answer directly from those results. "
     "If a search does not return an exact match, synthesize the most relevant findings "
     "from the closest retrieved documents. "
     "Answer directly, without calling any tool, for general medical questions "
@@ -71,16 +72,16 @@ TOOLS = [
                         "type": "string",
                         "description": "Natural language medical query targeting clinical notes",
                     },
-                    "record_index": {
+                    "patient_id": {
                         "type": "string",
-                        "description": "The exact alphanumeric record index (e.g., 'P0001', 'P0104') required to isolate the search.",
+                        "description": "The exact alphanumeric patient ID (e.g., 'P01854') required to isolate the search.",
                     },
                     "top_k": {
                         "type": "integer",
                         "description": "Number of relevant chunks to return after reranking. Defaults to 5.",
                     },
                 },
-                "required": ["query", "record_index"],
+                "required": ["query", "patient_id"],
             },
         },
     }
@@ -118,7 +119,7 @@ def _embed_query(query: str):
     
     return dense_vector, sparse_vector
 
-def search_clinical_documents(query: str, record_index: str, top_k: int = DEFAULT_FINAL_TOP_K) -> dict:
+def search_clinical_documents(query: str, patient_id: str, top_k: int = DEFAULT_FINAL_TOP_K) -> dict:
     """Lane 2: Native Qdrant Hybrid Search (Dense + Sparse RRF) -> Reranker."""
     _load_resources()
     dense_vector, sparse_vector = _embed_query(query)
@@ -127,7 +128,7 @@ def search_clinical_documents(query: str, record_index: str, top_k: int = DEFAUL
     strict_filter = Filter(
         must=[
             FieldCondition(key="bucket_name", match=MatchValue(value="transcription")),
-            FieldCondition(key="record_index", match=MatchValue(value=record_index))
+            FieldCondition(key="patient_id", match=MatchValue(value=patient_id))
         ]
     )
 
@@ -152,33 +153,36 @@ def search_clinical_documents(query: str, record_index: str, top_k: int = DEFAUL
         limit=CANDIDATE_POOL_SIZE,
     )
 
-    candidates = [
-        {
-            "text": point.payload.get("text", ""),
-            "record_index": point.payload.get("record_index"),
+    candidates = []
+    for point in search_result.points:
+        text_content = point.document if hasattr(point, 'document') and point.document else point.payload.get("text", "")
+        candidates.append({
+            "text": text_content,
+            "patient_id": point.payload.get("patient_id"),
             "section": point.payload.get("bucket_name"),
-        }
-        for point in search_result.points
-    ]
+            "visit_date": point.payload.get("visit_date"),
+            "visit_number": point.payload.get("visit_number_for_patient"),
+        })
 
     reranked = rerank(query=query, candidates=candidates, text_key="text", top_k=top_k)
 
     results = [
         {
             "text": item["text"],
-            "record_index": item["record_index"],
+            "patient_id": item["patient_id"],
             "section": item["section"],
+            "visit_date": item["visit_date"],
+            "visit_number": item["visit_number"],
         }
         for item in reranked
     ]
-
     # --- DEBUG PRINT ---
-    print(f"\n🔍 [QDRANT SEARCH] Looked for Patient: {record_index} | Found {len(results)} chunks.\n")
+    print(f"\n🔍 [QDRANT SEARCH] Looked for Patient: {patient_id} | Found {len(results)} chunks.\n")
 
     return {
         "status": "ok",
         "query": query,
-        "record_index": record_index,
+        "patient_id": patient_id,
         "results": results,
     }
 
@@ -201,20 +205,20 @@ def search_clinical_cohorts(query: str, top_k: int = DEFAULT_FINAL_TOP_K) -> dic
         limit=CANDIDATE_POOL_SIZE,
     )
 
-    candidates = [
-        {
-            "text": point.payload.get("text", ""),
-            "record_index": point.payload.get("record_index"),
+    candidates = []
+    for point in search_result.points:
+        text_content = point.document if hasattr(point, 'document') and point.document else point.payload.get("text", "")
+        candidates.append({
+            "text": text_content,
+            "patient_id": point.payload.get("patient_id"),
             "section": point.payload.get("bucket_name"),
-        }
-        for point in search_result.points
-    ]
+        })
 
     reranked = rerank(query=query, candidates=candidates, text_key="text", top_k=top_k)
 
     formatted_results = []
     for item in reranked:
-        formatted_results.append(f"Patient ID: {item['record_index']} | Finding: {item['text']}")
+        formatted_results.append(f"Patient ID: {item['patient_id']} | Finding: {item['text']}")
 
     return {
         "status": "ok",
@@ -260,14 +264,17 @@ def answer_analytical_query(question: str) -> str:
 TOOL_REGISTRY = {
     "search_clinical_documents": lambda **kwargs: search_clinical_documents(**kwargs),
 }
-def ask(user_question: str, max_rounds: int = 5) -> str:
-    """ReAct execution loop."""
+
+def ask(user_question: str, max_rounds: int = 5) -> tuple:
+    """ReAct execution loop. Returns (final_answer, used_context_chunks)"""
     _load_resources()
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_question},
     ]
+
+    used_context_chunks = []
 
     for _ in range(max_rounds):
         response = client.chat.completions.create(
@@ -279,7 +286,7 @@ def ask(user_question: str, max_rounds: int = 5) -> str:
 
         message = response.choices[0].message
         if not message.tool_calls:
-            return message.content
+            return message.content, used_context_chunks
 
         messages.append({
             "role": "assistant",
@@ -309,6 +316,9 @@ def ask(user_question: str, max_rounds: int = 5) -> str:
             else:
                 try:
                     result = TOOL_REGISTRY[fn_name](**fn_args)
+                    # Capture the chunks actually returned to the LLM during the ReAct loop
+                    if isinstance(result, dict) and "results" in result:
+                        used_context_chunks.extend(result["results"])
                 except Exception as e:
                     print(f"\n🚨 [CRITICAL TOOL ERROR]: {str(e)} 🚨\n")
                     result = {"status": "error", "message": str(e)}
@@ -337,15 +347,32 @@ def ask(user_question: str, max_rounds: int = 5) -> str:
             {"role": "user", "content": synthesis_prompt},
         ],
     )
-    return final_response.choices[0].message.content
+    return final_response.choices[0].message.content, used_context_chunks
 
 
 if __name__ == "__main__":
     load_reranker_model()
 
     print("--- Test 1: Direct Medical Knowledge ---")
-    print(ask("What are common complications of untreated hypertension?"))
+    ans, _ = ask("What are common complications of untreated hypertension?")
+    print(ans)
 
     print("\n--- Test 2: Secure Patient Retrieval ---")
-    # Using P0001 to ensure we hit a real record in your dataset
-    print(ask("What was the treatment plan for patient P0001?"))
+    ans, _ = ask("What was the treatment plan for patient P01854?")
+    print(ans)
+
+    print("Test 3---multi-visit chronology, no skips (P01305)")
+    ans, _ = ask("What new health issue came up at P01305's most recent visit, and how is that different from what was new at the visit before it?")
+    print(ans)
+
+    print("Test 4 — the batch-skip case (P03910)")
+    ans, _ = ask("How did P03910's fracture recovery progress between their two recorded visits, and roughly how much time passed between them?")
+    print(ans)
+
+    print("Test 5 — single-visit edge case (P00997)")
+    ans, _ = ask("What follow-up did the doctor plan for P00997 after their most recent visit?")
+    print(ans)
+
+    print("Test 6 — another skip-batch case, different specialty (P04897)")
+    ans, _ = ask("Was there a large gap between P04897's two visits, and what was the status of their cardiac catheterization by the later one?")
+    print(ans)

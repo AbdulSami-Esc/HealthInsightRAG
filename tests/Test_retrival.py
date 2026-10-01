@@ -14,11 +14,11 @@ from orchestrator import search_clinical_documents, load_reranker_model
 
 # Test Cases for Lane 2: Query and the strict ID we expect to isolate
 LANE_2_TESTS = [
-    ("What medications was this patient prescribed?", "P1001"),
-    ("Summarize the operative report.", "P0015"),
-    ("What were the findings of the chest CT scan?", "P2031"),
-    ("Review the physical examination notes.", "P3781"),
-    ("Any recorded drug allergies?", "P0023"),
+    ("What medications was this patient prescribed?", "P01305"),
+    ("Summarize the operative report.", "P00745"),
+    ("What were the findings of this patient's imaging?", "P01485"),
+    ("Review the physical examination notes.", "P02085"),
+    ("Any recorded drug allergies for this patient?", "P01604"),
 ]
 
 def run_retrieval_eval():
@@ -35,7 +35,7 @@ def run_retrieval_eval():
     for idx, (query, target_id) in enumerate(LANE_2_TESTS, start=1):
         try:
             # Hit the Qdrant database + Reranker directly
-            response = search_clinical_documents(query=query, record_index=target_id, top_k=3)
+            response = search_clinical_documents(query=query, patient_id=target_id, top_k=3)
             
             # The tool returns a dict with a 'results' list
             retrieved_chunks = response.get("results", [])
@@ -51,7 +51,7 @@ def run_retrieval_eval():
                 # 2. Check for Data Leakage (Did any chunk belong to a different patient?)
                 leak_detected = False
                 for chunk in retrieved_chunks:
-                    if chunk.get("record_index") != target_id:
+                    if chunk.get("patient_id") != target_id:
                         leak_detected = True
                         break
                 

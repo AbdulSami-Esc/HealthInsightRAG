@@ -15,41 +15,32 @@ for p in [str(ROOT_DIR), str(SRC_DIR)]:
 # Import your pipeline elements
 from orchestrator import (
     ask, 
-    search_clinical_documents, 
     load_reranker_model,
-    client,       # Reusing your Groq client for the Judge
-    MODEL_NAME    # Reusing gpt-oss-120b to act as the Judge
+    client,       
+    MODEL_NAME    
 )
 
 # Expanded Test Matrix (20 Queries)
 FAITHFULNESS_TESTS = [
-    ("What medications was patient P0001 prescribed upon discharge?", "P0001"),
-    ("Summarize the operative report for P0015.", "P0015"),
-    ("What were the findings of the chest CT scan for P0042?", "P0042"),
-    ("Review the physical examination notes for patient P0104.", "P0104"),
-    ("Did patient P0023 have any recorded drug allergies?", "P0023"),
-    ("What was the initial diagnosis for patient P0088?", "P0088"),
-    ("Retrieve the post-operative recovery plan for P0201.", "P0201"),
-    ("What was the blood pressure reading during admission for P0005?", "P0005"),
-    ("Show me the family medical history mentioned in P0310.", "P0310"),
-    ("What dosage of lisinopril was given to patient P0012?", "P0012"),
-    ("What was the primary complaint for patient P0111?", "P0111"),
-    ("Did patient P0222 require intubation during the procedure?", "P0222"),
-    ("What were the lab results for hemoglobin for patient P0333?", "P0333"),
-    ("Was patient P0444 referred to physical therapy?", "P0444"),
-    ("What surgical instruments were used for patient P0555?", "P0555"),
-    ("Summarize the discharge instructions for P0666.", "P0666"),
-    ("What was the estimated blood loss during P0777's surgery?", "P0777"),
-    ("Did patient P0888 have a history of smoking?", "P0888"),
-    ("What anesthesia was administered to P0999?", "P0999"),
-    ("List the post-op vital signs for patient P1000.", "P1000")
+    ("What medications was patient P01854 prescribed?", "P01854"),
+    ("Summarize the operative report for P03910.", "P03910"),
+    ("What were the findings for patient P04897's cardiac catheterization?", "P04897"),
+    ("Review the physical examination notes for patient P01305.", "P01305"),
+    ("Did patient P01604 have any recorded drug allergies?", "P01604"),
+    ("What was the initial diagnosis for patient P00997?", "P00997"),
+    ("Retrieve the post-operative recovery plan for P04543.", "P04543"),
+    ("What was recorded during admission for P01787?", "P01787"),
 ]
 
 def judge_faithfulness(question, context_chunks, generated_answer):
     """Uses the LLM to grade if the generated answer hallucinated."""
     
     # Combine chunks into a single readable string
-    context_text = "\n\n".join([f"Chunk {i+1}: {c['text']}" for i, c in enumerate(context_chunks)])
+    
+    context_text = "\n\n".join([
+    f"Chunk {i+1} (visit_date: {c.get('visit_date')}, visit_number: {c.get('visit_number')}): {c['text']}"
+    for i, c in enumerate(context_chunks)
+    ])
     
     judge_prompt = f"""You are an objective Clinical AI Evaluator. 
     Your job is to determine if the 'Generated Answer' contains ANY information, medications, diagnoses, or facts that are NOT explicitly stated in the 'Retrieved Context'.
@@ -89,20 +80,16 @@ def run_faithfulness_eval():
 
     for idx, (query, target_id) in enumerate(FAITHFULNESS_TESTS, start=1):
         try:
-            # 1. Run the full ReAct pipeline to get the final answer
-            final_answer = ask(query, max_rounds=3)
-            
-            # 2. Manually grab the exact context the LLM used to judge it
-            context_response = search_clinical_documents(query, target_id, top_k=5)
-            context_chunks = context_response.get("results", [])
+            # 1. Run the full ReAct pipeline and capture the exact context it used
+            final_answer, context_chunks = ask(query, max_rounds=3)
 
             if not context_chunks:
                 pipeline_status = "NO CONTEXT"
                 score = "N/A"
-                reasoning = "Database returned empty."
+                reasoning = "Database returned empty or tool not called."
             else:
                 pipeline_status = "ANSWER GENERATED"
-                # 3. Ask the Judge LLM to grade the answer
+                # 2. Ask the Judge LLM to grade the answer against that exact context
                 judgement = judge_faithfulness(query, context_chunks, final_answer)
                 score = judgement.get("score", "ERROR").upper()
                 reasoning = judgement.get("reasoning", "Failed to parse reasoning.")
@@ -125,7 +112,8 @@ def run_faithfulness_eval():
             "judge_reasoning": reasoning
         })
 
-        time.sleep(1) # Prevents rate-limiting from Groq
+        # Increased delay to 5 seconds to actively prevent HTTP 429 Too Many Requests errors
+        time.sleep(5)
 
     print("=" * 105)
     

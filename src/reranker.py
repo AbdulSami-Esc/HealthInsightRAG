@@ -48,8 +48,16 @@ def rerank(
 
     model = get_reranker_model()
 
-    # Build batched (query, chunk_text) pairs
-    sentence_pairs = [(query, item.get(text_key, item.get("payload", {}).get(text_key, ""))) for item in candidates]
+    # Build batched (query, chunk_text) pairs and fail loudly on missing text
+    sentence_pairs = []
+    for i, item in enumerate(candidates):
+        text = item.get(text_key)
+        if not text or not str(text).strip():
+            raise ValueError(
+                f"Reranker Error: Candidate at index {i} is missing valid text under the key '{text_key}'. "
+                f"Check upstream payload extraction. Candidate data: {item}"
+            )
+        sentence_pairs.append((query, str(text)))
 
     # Predict scores in a single batched pass
     scores = model.predict(sentence_pairs)

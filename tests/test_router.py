@@ -28,16 +28,12 @@ TEST_CASES = [
     ("What are the clinical diagnostic criteria for hypertension?", "GENERAL"),
 
     # Lane 2: SINGLE_PATIENT (Contains specific record ID)
-    ("What medications was patient P0001 prescribed upon discharge?", "SINGLE_PATIENT"),
-    ("Summarize the operative report for record P0015.", "SINGLE_PATIENT"),
-    ("What were the findings of the chest CT scan for P0042?", "SINGLE_PATIENT"),
-    ("Can you review the physical examination notes for patient P0104?", "SINGLE_PATIENT"),
-    ("Did patient P0023 have any recorded drug allergies?", "SINGLE_PATIENT"),
-    ("What was the initial diagnosis recorded for patient P0088 in the emergency note?", "SINGLE_PATIENT"),
-    ("Retrieve the post-operative recovery plan for patient P0201.", "SINGLE_PATIENT"),
-    ("What was the blood pressure reading recorded during admission for P0005?", "SINGLE_PATIENT"),
-    ("Show me the family medical history mentioned in P0310.", "SINGLE_PATIENT"),
-    ("What dosage of lisinopril was given to patient P0012?", "SINGLE_PATIENT"),
+
+    ("What medications was this patient prescribed?", "P01305"),
+    ("Summarize the operative report.", "P00745"),
+    ("What were the findings of this patient's imaging?", "P01485"),
+    ("Review the physical examination notes.", "P02085"),
+    ("Any recorded drug allergies for this patient?", "P01604"),
 
     # Lane 3: COHORT (Thematic search across multiple records without specific ID)
     ("Find all patients who presented with severe shortness of breath or dyspnea.", "COHORT"),
@@ -52,16 +48,17 @@ TEST_CASES = [
     ("Identify patients with stage 3 or 4 chronic kidney disease mentioned in consultations.", "COHORT"),
 
     # Lane 4: ANALYTICAL (Aggregations, counts, percentages, metadata queries)
-    ("How many total clinical chunks exist in the dataset, and what is the breakdown by section?", "ANALYTICAL"),
-    ("What is the total count of distinct patients in the metadata?", "ANALYTICAL"),
-    ("Which medical specialty has the highest number of transcription records?", "ANALYTICAL"),
-    ("What is the average number of chunks per patient record?", "ANALYTICAL"),
-    ("Count how many records belong to the Cardiology specialty versus Neurology.", "ANALYTICAL"),
-    ("What are the top 5 most frequent medical specialties in the chunk metadata?", "ANALYTICAL"),
-    ("How many chunks are categorized under the description bucket?", "ANALYTICAL"),
-    ("What percentage of the dataset corresponds to surgical operation notes?", "ANALYTICAL"),
+    
+    ("How many total clinical chunks exist in the dataset, and what is the breakdown by bucket_name?", "ANALYTICAL"),
+    ("What is the total count of distinct patients in the metadata?", "ANALYTICAL"),  # real answer: 4,966
+    ("Which medical specialty has the highest number of encounters?", "ANALYTICAL"),  # real answer: Surgery (2,200)
+    ("What is the average number of visits per patient?", "ANALYTICAL"),  # real answer: ~1.89
+    ("Count how many encounters belong to Cardiovascular/Pulmonary versus Neurology.", "ANALYTICAL"),  # 724 vs 384
+    ("What are the top 5 most frequent medical specialties in the dataset?", "ANALYTICAL"),
+    ("How many chunks are categorized under the transcription bucket versus the medical_specialty bucket?", "ANALYTICAL"),
+    ("What percentage of encounters correspond to the Surgery specialty?", "ANALYTICAL"),
     ("Give me the total row count of the chunk_metadata CSV file.", "ANALYTICAL"),
-    ("How many records have missing or null values in the sample_name column?", "ANALYTICAL"),
+    ("How many patients have more than one recorded visit?", "ANALYTICAL"),
 ]
 
 ##Only isolting and running the route query function so that router is isolated and less token cost
@@ -86,10 +83,6 @@ def run_router_eval():
                 outcome = str(raw_res).strip()
 
             outcome = str(outcome).upper()
-
-        except Exception as e:
-            outcome = f"ERROR: {str(e)[:15]}"
-
 
         except Exception as e:
             outcome = f"ERROR: {str(e)[:15]}"

@@ -1,1 +1,1 @@
-{"schema":{"record_index":"keyword","bucket_name":"keyword"}}
+{"schema":{"patient_id":"keyword","encounter_id":"keyword","bucket_name":"keyword"}}

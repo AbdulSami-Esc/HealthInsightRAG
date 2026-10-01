@@ -1,87 +1,84 @@
 import pandas as pd
 import re
+import os
+import glob
+from pathlib import Path
 from transformers import AutoTokenizer
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-import os
-from pathlib import Path
 
 MAX_CHUNK_SIZE = 256
-
 tokenizer = AutoTokenizer.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
-
-general_splitter = RecursiveCharacterTextSplitter(
-    chunk_size=MAX_CHUNK_SIZE,
-    chunk_overlap=30,
-    separators=["\n\n", "\n", ". ", ", ", " "],
-    length_function=lambda x: len(tokenizer.encode(x, add_special_tokens=False))
-)
 
 def process_clinical_transcription(transcript_text):
     header_pattern = re.compile(r'(?m)^([A-Z\s/]+:)\s*')
     parts = header_pattern.split(str(transcript_text))
     
-    sections = []
+    final_chunks = []
     current_header = "UNSPECIFIED:"
+    
     for part in parts:
         if header_pattern.match(part):
             current_header = part.strip()
         elif part.strip(): 
-            sections.append(f"{current_header} {part.strip()}")
+            content = part.strip()
+            full_text = f"{current_header} {content}"
             
-    final_chunks = []
-    for section in sections:
-        if len(tokenizer.encode(section, add_special_tokens=False)) > MAX_CHUNK_SIZE:
-            final_chunks.extend(general_splitter.split_text(section))
-        else:
-            final_chunks.append(section)
+            if len(tokenizer.encode(full_text, add_special_tokens=False, truncation=True, max_length=10000)) > MAX_CHUNK_SIZE:
+                # Calculate how many tokens the header consumes
+                header_tokens = len(tokenizer.encode(f"{current_header} ", add_special_tokens=False))
+                
+                # Deduct header size from max limit so the final combined chunk fits safely
+                available_chunk_size = max(50, MAX_CHUNK_SIZE - header_tokens)
+                
+                # Reintroduce Langchain splitter for recursive, boundary-aware splitting with overlap
+                section_splitter = RecursiveCharacterTextSplitter(
+                    chunk_size=available_chunk_size,
+                    chunk_overlap=30,
+                    separators=["\n\n", "\n", ". ", ", ", " "],
+                    length_function=lambda x: len(tokenizer.encode(x, add_special_tokens=False, truncation=True, max_length=10000))
+                )
+                
+                # Split the raw content, then attach the header to every resulting piece
+                content_chunks = section_splitter.split_text(content)
+                for chunk in content_chunks:
+                    final_chunks.append(f"{current_header} {chunk}")
+            else:
+                final_chunks.append(full_text)
             
     return final_chunks
 
-
-def process_single_record(row):
+def process_single_record(row: dict) -> dict:
     record_buckets = {}
-    
-    desc_text = str(row.get('description', ''))
-    
-    index_val = row.get('index')
-    if index_val is not None and pd.notna(index_val):
-        desc_text = f"Index {index_val}: {desc_text}"
-        
-    record_buckets['description'] = general_splitter.split_text(desc_text) if desc_text else []
-    
-    specialty_text = str(row.get('medical_specialty', ''))
-    if specialty_text:
-        encoded_tokens = tokenizer.encode(specialty_text, add_special_tokens=False)
-        safe_text = tokenizer.decode(encoded_tokens[:MAX_CHUNK_SIZE])
-        record_buckets['medical_specialty'] = [safe_text]
+
+    def get_text(key: str) -> str:
+        val = row.get(key)
+        return str(val).strip() if pd.notna(val) and val is not None else ""
+
+    specialty = get_text('medical_specialty')
+    if specialty:
+        tokens = tokenizer.encode(specialty, add_special_tokens=False, truncation=True, max_length=10000)
+        record_buckets['medical_specialty'] = [tokenizer.decode(tokens[:MAX_CHUNK_SIZE])]
     else:
         record_buckets['medical_specialty'] = []
-    
-    transcript_text = str(row.get('transcription', ''))
-    record_buckets['transcription'] = process_clinical_transcription(transcript_text) if transcript_text else []
-    
-    sample = str(row.get('sample_name', ''))
-    keywords = str(row.get('keywords', ''))
-    combined_text = f"Sample Name: {sample} | Keywords: {keywords}"
-    record_buckets['sample_name_keywords'] = general_splitter.split_text(combined_text) if sample or keywords else []
-    
+
+    transcript = get_text('transcription')
+    record_buckets['transcription'] = process_clinical_transcription(transcript) if transcript else []
+
     return record_buckets
 
-
 def prepare_all_chunks(df):
-    # 1. ADD THIS EXACT LINE HERE to format the IDs
-    df['index'] = "P" + df['index'].astype(str).str.zfill(4)
-    
     flattened_chunks = []
     
-    for idx, row in df.iterrows():
+    for _, row in df.iterrows():
         buckets = process_single_record(row)
         
         for bucket_name, chunks in buckets.items():
             for chunk_pos, chunk_text in enumerate(chunks):
                 flattened_chunks.append({
-                    # 2. CHANGE 'idx' to "row['index']" HERE
-                    "record_index": row['index'],
+                    "encounter_id": row['encounter_id'],
+                    "patient_id": row['patient_id'],
+                    "visit_date": row['visit_date'],
+                    "visit_number_for_patient": row['visit_number_for_patient'],
                     "bucket_name": bucket_name,
                     "chunk_position": chunk_pos,
                     "text": chunk_text
@@ -89,26 +86,54 @@ def prepare_all_chunks(df):
                 
     return flattened_chunks
 
-
-
-
-
 if __name__ == "__main__":
-    print("Loading raw clinical dataset (mtsamples.csv)...")
     base_dir = Path(__file__).resolve().parent.parent
-    
-    # Load raw data
-    raw_path = base_dir / "data" / "unstructured" / "raw" / "mtsamples.csv"
-    raw_df = pd.read_csv(raw_path)
-
-    print("Executing chunking and formatting Patient IDs...")
-    chunks = prepare_all_chunks(raw_df)
-
-    # Save to processed folder
+    raw_dir = base_dir / "data" / "unstructured" / "raw"
     processed_dir = base_dir / "data" / "unstructured" / "processed"
-    processed_dir.mkdir(parents=True, exist_ok=True)
-    
     output_path = processed_dir / "chunk_metadata.csv"
-    pd.DataFrame(chunks).to_csv(output_path, index=False)
+    
+    visit_files = glob.glob(str(raw_dir / "visit_*_notes.csv"))
+    
+    if not visit_files:
+        print("No visit files found.")
+        exit()
+
+    dfs = [pd.read_csv(f) for f in visit_files]
+    combined_df = pd.concat(dfs, ignore_index=True)
+    
+    gt_df = pd.read_csv(raw_dir / "ground_truth_labels.csv")
+    master_df = combined_df.merge(gt_df[['encounter_id', 'visit_number_for_patient']], on='encounter_id', how='left')
+    
+    master_df['token_count'] = master_df['transcription'].astype(str).apply(
+        lambda x: len(tokenizer.encode(x, add_special_tokens=False, truncation=True, max_length=10000))
+    )
+    master_df = master_df[master_df['token_count'] >= 20]
+
+    processed_dir.mkdir(parents=True, exist_ok=True)
+    append_mode = False
+    
+    if output_path.exists():
+        existing_metadata = pd.read_csv(output_path)
+        if 'encounter_id' in existing_metadata.columns:
+            existing_encounters = set(existing_metadata['encounter_id'].unique())
+            master_df = master_df[~master_df['encounter_id'].isin(existing_encounters)]
+            print(f"Skipping {len(existing_encounters)} existing encounters.")
+            append_mode = True
+        else:
+            print("Legacy chunk_metadata.csv detected. Overwriting with new schema.")
+            append_mode = False
+
+    if master_df.empty:
+        print("No new encounters to process.")
+        exit()
+
+    print(f"Executing chunking for {len(master_df)} new encounters...")
+    new_chunks = prepare_all_chunks(master_df)
+    new_chunks_df = pd.DataFrame(new_chunks)
+
+    if append_mode:
+        new_chunks_df.to_csv(output_path, mode='a', header=False, index=False)
+    else:
+        new_chunks_df.to_csv(output_path, index=False)
     
     print(f"Success! Formatted chunk metadata saved to {output_path}")
