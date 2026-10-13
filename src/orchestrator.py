@@ -18,12 +18,20 @@ from groq import Groq
 from qdrant_client import QdrantClient
 from qdrant_client.models import Filter, FieldCondition, MatchValue, Prefetch, FusionQuery, Fusion, SparseVector
 from fastembed import TextEmbedding, SparseTextEmbedding
+try:
+    from src.fsm_observer import FSMObserver, Lane, State
+except ModuleNotFoundError:
+    from fsm_observer import FSMObserver, Lane, State
 
-# 3. Direct import because reranker.py lives in the same folder
 try:
     from src.reranker import rerank, load_reranker_model
 except ModuleNotFoundError:
     from reranker import rerank, load_reranker_model
+
+try:
+    from src.prompt_manager import build_managed_context,stratified_temporal_window
+except ModuleNotFoundError:
+    from prompt_manager import build_managed_context,stratified_temporal_window
 
 import pandas as pd
 from langchain_experimental.agents import create_pandas_dataframe_agent
@@ -89,7 +97,7 @@ TOOLS = [
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# --- Lazy singletons ---
+
 _qdrant_client = None
 _dense_model = None
 _sparse_model = None
@@ -102,6 +110,12 @@ def _load_resources():
         _dense_model = TextEmbedding("sentence-transformers/all-MiniLM-L6-v2")
     if _sparse_model is None:
         _sparse_model = SparseTextEmbedding("Qdrant/bm25")
+    
+    try:
+        load_reranker_model()
+    except Exception:
+        pass  
+
 
 def _embed_query(query: str):
     """Helper function to explicitly generate vectors using FastEmbed."""
@@ -120,11 +134,14 @@ def _embed_query(query: str):
     return dense_vector, sparse_vector
 
 def search_clinical_documents(query: str, patient_id: str, top_k: int = DEFAULT_FINAL_TOP_K) -> dict:
-    """Lane 2: Native Qdrant Hybrid Search (Dense + Sparse RRF) -> Reranker."""
+    observer = FSMObserver(max_retries=2)
+    observer.transition_to(State.ROUTING)
+    observer.set_lane(Lane.SINGLE_PATIENT)
+    
+    observer.transition_to(State.EXTRACT_RECORD_INDEX)
     _load_resources()
     dense_vector, sparse_vector = _embed_query(query)
 
-    # 1. Strict Patient & Document Type Pre-filtering
     strict_filter = Filter(
         must=[
             FieldCondition(key="bucket_name", match=MatchValue(value="transcription")),
@@ -132,40 +149,55 @@ def search_clinical_documents(query: str, patient_id: str, top_k: int = DEFAULT_
         ]
     )
 
-    # 2. Native Hybrid Search
-    search_result = _qdrant_client.query_points(
-        collection_name=COLLECTION_NAME,
-        prefetch=[
-            Prefetch(
-                query=dense_vector,
-                using="dense",
-                filter=strict_filter,
-                limit=CANDIDATE_POOL_SIZE,
-            ),
-            Prefetch(
-                query=sparse_vector,
-                using="sparse",
-                filter=strict_filter,
-                limit=CANDIDATE_POOL_SIZE,
-            ),
-        ],
-        query=FusionQuery(fusion=Fusion.RRF),
-        limit=CANDIDATE_POOL_SIZE,
-    )
+    current_pool_size = CANDIDATE_POOL_SIZE
+    search_result = None
+
+    for attempt in range(observer.max_retries + 1):
+        observer.transition_to(State.QDRANT_HYBRID_RRF)
+        try:
+            search_result = _qdrant_client.query_points(
+                collection_name=COLLECTION_NAME,
+                prefetch=[
+                    Prefetch(query=dense_vector, using="dense", filter=strict_filter, limit=current_pool_size),
+                    Prefetch(query=sparse_vector, using="sparse", filter=strict_filter, limit=current_pool_size),
+                ],
+                query=FusionQuery(fusion=Fusion.RRF),
+                limit=current_pool_size,
+            )
+            
+            if search_result and len(search_result.points) > 0:
+                break
+            else:
+                raise ValueError("Zero points returned from Qdrant hybrid search.")
+
+        except Exception as e:
+            error_msg = str(e)
+            print(f"\n🚨 [RETRIEVAL WARNING on attempt {attempt+1}]: {error_msg} 🚨\n")
+            if observer.retry_count < observer.max_retries:
+                observer.trigger_healing(f"Retrieval zero-hit/error: {error_msg}")
+                current_pool_size *= 2  # Expand candidate pool size for fallback
+                observer.transition_to(State.QDRANT_HYBRID_RRF)
+            else:
+                observer.transition_to(State.FAILED)
+                search_result = None
+                break
 
     candidates = []
-    for point in search_result.points:
-        text_content = point.document if hasattr(point, 'document') and point.document else point.payload.get("text", "")
-        candidates.append({
-            "text": text_content,
-            "patient_id": point.payload.get("patient_id"),
-            "section": point.payload.get("bucket_name"),
-            "visit_date": point.payload.get("visit_date"),
-            "visit_number": point.payload.get("visit_number_for_patient"),
-        })
+    if search_result and hasattr(search_result, 'points'):
+        for point in search_result.points:
+            text_content = point.document if hasattr(point, 'document') and point.document else point.payload.get("text", "")
+            candidates.append({
+                "text": text_content,
+                "patient_id": point.payload.get("patient_id"),
+                "section": point.payload.get("bucket_name"),
+                "visit_date": point.payload.get("visit_date"),
+                "visit_number": point.payload.get("visit_number_for_patient"),
+            })
 
+    observer.transition_to(State.CROSS_ENCODER_RERANK)
     reranked = rerank(query=query, candidates=candidates, text_key="text", top_k=top_k)
 
+    observer.transition_to(State.FORMAT_PATIENT_CONTEXT)
     results = [
         {
             "text": item["text"],
@@ -176,9 +208,9 @@ def search_clinical_documents(query: str, patient_id: str, top_k: int = DEFAULT_
         }
         for item in reranked
     ]
-    # --- DEBUG PRINT ---
     print(f"\n🔍 [QDRANT SEARCH] Looked for Patient: {patient_id} | Found {len(results)} chunks.\n")
 
+    observer.transition_to(State.COMPLETED)
     return {
         "status": "ok",
         "query": query,
@@ -186,8 +218,13 @@ def search_clinical_documents(query: str, patient_id: str, top_k: int = DEFAULT_
         "results": results,
     }
 
+
 def search_clinical_cohorts(query: str, top_k: int = DEFAULT_FINAL_TOP_K) -> dict:
-    """Lane 3: Qdrant Hybrid Search WITHOUT the patient ID filter for cohort analysis."""
+    observer = FSMObserver(max_retries=2)
+    observer.transition_to(State.ROUTING)
+    observer.set_lane(Lane.COHORT)
+    
+    observer.transition_to(State.GLOBAL_HYBRID_SEARCH)
     _load_resources()
     dense_vector, sparse_vector = _embed_query(query)
 
@@ -195,39 +232,80 @@ def search_clinical_cohorts(query: str, top_k: int = DEFAULT_FINAL_TOP_K) -> dic
         must=[FieldCondition(key="bucket_name", match=MatchValue(value="transcription"))]
     )
 
-    search_result = _qdrant_client.query_points(
-        collection_name=COLLECTION_NAME,
-        prefetch=[
-            Prefetch(query=dense_vector, using="dense", filter=cohort_filter, limit=CANDIDATE_POOL_SIZE),
-            Prefetch(query=sparse_vector, using="sparse", filter=cohort_filter, limit=CANDIDATE_POOL_SIZE),
-        ],
-        query=FusionQuery(fusion=Fusion.RRF),
-        limit=CANDIDATE_POOL_SIZE,
-    )
+    current_pool_size = CANDIDATE_POOL_SIZE
+    search_result = None
+
+    for attempt in range(observer.max_retries + 1):
+        observer.transition_to(State.QDRANT_SEARCH)
+        try:
+            search_result = _qdrant_client.query_points(
+                collection_name=COLLECTION_NAME,
+                prefetch=[
+                    Prefetch(query=dense_vector, using="dense", filter=cohort_filter, limit=current_pool_size),
+                    Prefetch(query=sparse_vector, using="sparse", filter=cohort_filter, limit=current_pool_size),
+                ],
+                query=FusionQuery(fusion=Fusion.RRF),
+                limit=current_pool_size,
+            )
+            
+            if search_result and len(search_result.points) > 0:
+                break
+            else:
+                raise ValueError("Zero points returned from Qdrant cohort search.")
+
+        except Exception as e:
+            error_msg = str(e)
+            print(f"\n🚨 [COHORT RETRIEVAL WARNING on attempt {attempt+1}]: {error_msg} 🚨\n")
+            if observer.retry_count < observer.max_retries:
+                observer.trigger_healing(f"Cohort retrieval zero-hit/error: {error_msg}")
+                current_pool_size *= 2  # Expand candidate pool size for fallback
+                observer.transition_to(State.QDRANT_SEARCH)
+            else:
+                observer.transition_to(State.FAILED)
+                search_result = None
+                break
 
     candidates = []
-    for point in search_result.points:
-        text_content = point.document if hasattr(point, 'document') and point.document else point.payload.get("text", "")
-        candidates.append({
-            "text": text_content,
-            "patient_id": point.payload.get("patient_id"),
-            "section": point.payload.get("bucket_name"),
-        })
+    if search_result and hasattr(search_result, 'points'):
+        for point in search_result.points:
+            text_content = point.document if hasattr(point, 'document') and point.document else point.payload.get("text", "")
+            candidates.append({
+                "text": text_content,
+                "patient_id": point.payload.get("patient_id"),
+                "section": point.payload.get("bucket_name"),
+            })
 
     reranked = rerank(query=query, candidates=candidates, text_key="text", top_k=top_k)
 
+    observer.transition_to(State.MARKDOWN_TABLE_OUTPUT)
     formatted_results = []
     for item in reranked:
         formatted_results.append(f"Patient ID: {item['patient_id']} | Finding: {item['text']}")
 
+    observer.transition_to(State.COMPLETED)
     return {
         "status": "ok",
         "query": query,
         "results": formatted_results,
     }
 
+
+
+
+
+
+
+
+
+
+
 def answer_analytical_query(question: str) -> str:
-    """Lane 4: Bypasses Qdrant entirely and dynamically executes native Pandas operations."""
+    """Lane 4: Dynamic Pandas execution via `exec` equipped with FSM Self-Healing retry loop."""
+    observer = FSMObserver(max_retries=2)
+    observer.transition_to(State.ROUTING)
+    observer.set_lane(Lane.ANALYTICAL)
+    observer.transition_to(State.PANDAS_EXECUTION)
+
     csv_path = BASE_DIR / "data" / "unstructured" / "processed" / "chunk_metadata.csv"
     df = pd.read_csv(csv_path)
 
@@ -239,40 +317,70 @@ def answer_analytical_query(question: str) -> str:
         f"You MUST assign the final textual or numerical answer to a variable named 'result'."
     )
 
-    try:
-        # Use the global working client and gpt-oss-120b
-        response = client.chat.completions.create(
-            model=MODEL_NAME, 
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0
-        )
-        
-        # Strip any accidental markdown formatting from the LLM
-        code = response.choices[0].message.content.strip()
-        code = code.replace("```python", "").replace("```", "").strip()
-        
-        # Execute the pandas code dynamically
-        local_vars = {"df": df, "pd": pd}
-        exec(code, {}, local_vars)
-        
-        return str(local_vars.get("result", "Execution successful, but no 'result' variable was created."))
-    except Exception as e:
-        return f"Error executing analytical math: {str(e)}\nAttempted Code:\n{code}"
+    current_prompt = prompt
+    code = ""
+    for attempt in range(observer.max_retries + 1):
+        try:
+            response = client.chat.completions.create(
+                model=MODEL_NAME, 
+                messages=[{"role": "user", "content": current_prompt}],
+                temperature=0
+            )
+            
+            code = response.choices[0].message.content.strip()
+            code = code.replace("```python", "").replace("```", "").strip()
+            
+            local_vars = {"df": df, "pd": pd}
+            exec(code, {}, local_vars)
+            
+            result_str = str(local_vars.get("result", "Execution successful, but no 'result' variable was created."))
+            observer.transition_to(State.QUANTITATIVE_RESULT)
+            observer.transition_to(State.COMPLETED)
+            return result_str
 
+        except Exception as e:
+            error_msg = str(e)
+            print(f"\n🚨 [PANDAS EXECUTION ERROR on attempt {attempt+1}]: {error_msg} 🚨\n")
+            if observer.retry_count < observer.max_retries:
+                observer.trigger_healing(f"Pandas execution error: {error_msg}")
+                observer.transition_to(State.PANDAS_EXECUTION)
+                current_prompt = (
+                    f"{prompt}\n\n"
+                    f"PREVIOUS ATTEMPT FAILED with error: {error_msg}.\n"
+                    f"Failed code was:\n{code}\n"
+                    f"Fix the error, ensure valid pandas syntax/column names, and output ONLY raw python code assigning to 'result'."
+                )
+            else:
+                observer.transition_to(State.FAILED)
+                return f"Error executing analytical math after retries: {error_msg}\nAttempted Code:\n{code}"
 
+            
 # ReAct loop elements
 TOOL_REGISTRY = {
     "search_clinical_documents": lambda **kwargs: search_clinical_documents(**kwargs),
 }
 
 def ask(user_question: str, max_rounds: int = 5) -> tuple:
-    """ReAct execution loop. Returns (final_answer, used_context_chunks)"""
+    print("\n🚀 [DEBUG] RUNNING NEW ASK() WITH FSM OBSERVER 🚀\n")
     _load_resources()
+
+    observer = FSMObserver(max_retries=2)
+    observer.transition_to(State.ROUTING)
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_question},
     ]
+
+    # Quick peek to see if tools are likely needed (or let the first LLM turn decide)
+    # For clean lane setting: if it's general, set LANE.GENERAL; if patient-specific, set SINGLE_PATIENT
+    # We can inspect the prompt text for a patient ID pattern (e.g., 'P0')
+    is_general = not any(p in user_question for p in ["P0", "patient"])
+    
+    if is_general:
+        observer.set_lane(Lane.GENERAL)
+    else:
+        observer.set_lane(Lane.SINGLE_PATIENT)
 
     used_context_chunks = []
 
@@ -285,24 +393,18 @@ def ask(user_question: str, max_rounds: int = 5) -> tuple:
         )
 
         message = response.choices[0].message
+        
+        # Lane 1: General Medical Question (Direct Response)
         if not message.tool_calls:
+            if observer.active_lane == Lane.GENERAL:
+                observer.transition_to(State.DIRECT_LLM_RESPONSE)
+            observer.transition_to(State.COMPLETED)
             return message.content, used_context_chunks
 
-        messages.append({
-            "role": "assistant",
-            "content": message.content,
-            "tool_calls": [
-                {
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {
-                        "name": tc.function.name,
-                        "arguments": tc.function.arguments,
-                    },
-                }
-                for tc in message.tool_calls
-            ],
-        })
+        # If tools are called, ensure lane is SINGLE_PATIENT
+        if observer.active_lane != Lane.SINGLE_PATIENT:
+            observer.active_lane = Lane.SINGLE_PATIENT
+        observer.transition_to(State.REACT_LOOP)
 
         for tc in message.tool_calls:
             fn_name = tc.function.name
@@ -316,26 +418,25 @@ def ask(user_question: str, max_rounds: int = 5) -> tuple:
             else:
                 try:
                     result = TOOL_REGISTRY[fn_name](**fn_args)
-                    # Capture the chunks actually returned to the LLM during the ReAct loop
                     if isinstance(result, dict) and "results" in result:
                         used_context_chunks.extend(result["results"])
                 except Exception as e:
                     print(f"\n🚨 [CRITICAL TOOL ERROR]: {str(e)} 🚨\n")
+                    observer.trigger_healing(str(e))
                     result = {"status": "error", "message": str(e)}
-            
-            messages.append({
-                "role": "tool",
-                "tool_call_id": tc.id,
-                "name": fn_name,
-                "content": json.dumps(result),
-            })
 
-    collected_results = [m["content"] for m in messages if m.get("role") == "tool"]
+        break
+
+    managed_context = build_managed_context(
+        retrieved_chunks=used_context_chunks,
+        client=client,
+        model_name=MODEL_NAME
+    )
 
     synthesis_prompt = (
         f"Original question: {user_question}\n\n"
         f"Retrieved clinical context:\n"
-        f"{chr(10).join(collected_results)}\n\n"
+        f"{managed_context}\n\n"
         f"Using solely the retrieved information above, formulate a concise, factual answer. "
         f"Do not call any additional tools."
     )
@@ -347,8 +448,11 @@ def ask(user_question: str, max_rounds: int = 5) -> tuple:
             {"role": "user", "content": synthesis_prompt},
         ],
     )
-    return final_response.choices[0].message.content, used_context_chunks
 
+    observer.transition_to(State.COMPLETED)
+    final_context_chunks = stratified_temporal_window(used_context_chunks)
+
+    return final_response.choices[0].message.content, final_context_chunks
 
 if __name__ == "__main__":
     load_reranker_model()
